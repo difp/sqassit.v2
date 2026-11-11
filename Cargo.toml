@@ -18,6 +18,8 @@ minijinja = { version = "3.1.0", features = ["builtins"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
 serde = { version = "1.0.229", features = ["derive"] }
 unicode-general-category = "1.1.0"
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

@@ -12,6 +12,7 @@ pub struct Profiles {
     pub db: Arc<Mutex<Connection>>,
     pub bot_token: String,
     pub owner: i64,
+    pub timezone: chrono_tz::Tz,
 }
 
 #[derive(Debug)]
@@ -68,7 +69,7 @@ fn normalize_phone(phone: &str) -> Result<String, ProfileError> {
 }
 
 impl Profiles {
-    fn user_id(&self, init: &str, now: i64) -> Result<(i64, Value), ProfileError> {
+    pub(crate) fn user_id(&self, init: &str, now: i64) -> Result<(i64, Value), ProfileError> {
         let data = auth::validate_init_data(init, &self.bot_token, now, 86_400).map_err(|e| {
             ProfileError::Unauthorized(match e {
                 auth::AuthError::EmptyInitData => "Пустой initData.",
@@ -91,7 +92,7 @@ impl Profiles {
             .ok_or(ProfileError::Unauthorized("Некорректный telegram_id."))?;
         Ok((id, data.user))
     }
-    fn register(
+    pub(crate) fn register(
         &self,
         db: &Connection,
         id: i64,
@@ -111,6 +112,21 @@ impl Profiles {
         db.execute("INSERT INTO users (telegram_id, username, first_name, is_coach, created_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, is_coach=excluded.is_coach WHERE username IS NOT excluded.username OR first_name IS NOT excluded.first_name OR is_coach IS NOT excluded.is_coach", params![id, username, first_name, coach, now]).map_err(|_| ProfileError::Storage)?;
         Ok(())
     }
+    pub(crate) fn avatar_url(&self, id: i64, file: Option<&str>, real: bool, now: i64) -> String {
+        let payload = format!(
+            "avatar-version:{id}:{}",
+            file.filter(|s| !s.is_empty()).unwrap_or("none")
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.bot_token.as_bytes()).expect("HMAC key");
+        mac.update(payload.as_bytes());
+        let version = hex::encode(mac.finalize().into_bytes());
+        let kind = if real { "avatar_real" } else { "avatar" };
+        let token = auth::issue_scoped_token(&self.bot_token, kind, id, id, now, 604_800);
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", &token)
+            .finish();
+        format!("/api/avatar/{id}/{}?{query}", &version[..12])
+    }
     pub fn me(&self, init: &str, now: i64) -> Result<Value, ProfileError> {
         let (id, user) = self.user_id(init, now)?;
         let db = self.db.lock().map_err(|_| ProfileError::Storage)?;
@@ -129,15 +145,10 @@ impl Profiles {
         let (emoji, name) = identity::animal_identity(id);
         db.query_row("SELECT first_name,is_coach,notifications_enabled,phone,notify_matches,notify_trainings,notify_messages,avatar_file_id,about,display_mode,show_username,onboarding_seen FROM users WHERE telegram_id=?1", [id], |r| {
             let file: Option<String> = r.get(7)?;
-            let payload = format!("avatar-version:{id}:{}", file.as_deref().filter(|s| !s.is_empty()).unwrap_or("none"));
-            let mut mac = Hmac::<Sha256>::new_from_slice(self.bot_token.as_bytes()).expect("HMAC key"); mac.update(payload.as_bytes());
-            let version = hex::encode(mac.finalize().into_bytes());
-            let token = auth::issue_scoped_token(&self.bot_token, "avatar_real", id, id, now, 604_800);
-            let query = form_urlencoded::Serializer::new(String::new()).append_pair("token", &token).finish();
             Ok(json!({"ok":true,"user":{
                 "telegram_id":id,"first_name":r.get::<_,Option<String>>(0)?,"is_coach":r.get::<_,bool>(1)?,"is_owner":owner,"is_manager":manager,
                 "notifications_enabled":r.get::<_,bool>(2)?,"phone":r.get::<_,String>(3)?,"notify_matches":r.get::<_,bool>(4)?,"notify_trainings":r.get::<_,bool>(5)?,"notify_messages":r.get::<_,bool>(6)?,
-                "avatar_url":format!("/api/avatar/{id}/{}?{query}", &version[..12]),"about":r.get::<_,String>(8)?,"display_mode":r.get::<_,String>(9)?,"show_username":r.get::<_,bool>(10)?,"onboarding_seen":r.get::<_,bool>(11)?,"animal":{"emoji":emoji,"name":name}
+                "avatar_url":self.avatar_url(id, file.as_deref(), true, now),"about":r.get::<_,String>(8)?,"display_mode":r.get::<_,String>(9)?,"show_username":r.get::<_,bool>(10)?,"onboarding_seen":r.get::<_,bool>(11)?,"animal":{"emoji":emoji,"name":name}
             }}))
         }).map_err(|_| ProfileError::Storage)
     }

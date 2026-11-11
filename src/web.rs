@@ -1,6 +1,6 @@
 //! Experimental HTTP shell for the migrated UI. The API and bot are unfinished.
 use axum::{
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -155,6 +155,24 @@ async fn api_update_profile(
     })
     .await
 }
+#[derive(serde::Deserialize)]
+struct TrainingQuery {
+    #[serde(default = "default_days")]
+    days: i64,
+}
+fn default_days() -> i64 {
+    7
+}
+async fn api_trainings(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<TrainingQuery>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::trainings::list(&p, &i, n, query.days, p.timezone)
+    })
+    .await
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -190,6 +208,7 @@ pub fn router(
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
+        .route("/api/trainings", get(api_trainings))
         .route("/api/me/onboarding", post(api_onboarding))
         .route("/api/me/profile", put(api_update_profile))
         .route("/api/me/notifications", put(api_notifications))
@@ -262,10 +281,22 @@ mod tests {
         use tower::ServiceExt;
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::storage::initialize(&mut db).unwrap();
+        db.execute("INSERT INTO users(telegram_id,first_name,display_mode,created_at) VALUES (314,'Секретное имя','animal',0)", []).unwrap();
+        db.execute(
+            "INSERT INTO trainings(id,title,start_at,created_at) VALUES (7,'Вечерняя',?1,0)",
+            [now() + 3600],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO bookings(training_id,user_id,status,created_at) VALUES (7,314,'booked',0)",
+            [],
+        )
+        .unwrap();
         let profiles = crate::profile::Profiles {
             db: std::sync::Arc::new(std::sync::Mutex::new(db)),
             bot_token: "123456:TEST-TOKEN".into(),
             owner: 123,
+            timezone: chrono_tz::Europe::Moscow,
         };
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
@@ -356,6 +387,17 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let (_, body) = send(app.clone(), "GET", "/api/me", &signed, "").await;
         assert_eq!(body["user"]["display_mode"], "animal");
+        let (status, schedule) =
+            send(app.clone(), "GET", "/api/trainings?days=7", &signed, "").await;
+        assert_eq!(status, StatusCode::OK);
+        let event = &schedule["trainings"][0];
+        assert_eq!(event["title"], "Вечерняя");
+        assert_eq!(event["booked_count"], 1);
+        let person = &event["participants"][0];
+        assert_eq!(person["anonymous"], true);
+        assert_ne!(person["first_name"], "Секретное имя");
+        assert_eq!(person["avatar_url"], "");
+        assert!(person.get("telegram_id").is_none());
         assert_eq!(
             send(app, "GET", "/api/me", &signed.replace("42", "43"), "")
                 .await

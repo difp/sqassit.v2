@@ -7,4 +7,5 @@ pub mod identity;
 pub mod profile;
 pub mod rate_limit;
 pub mod storage;
+pub mod trainings;
 pub mod web;

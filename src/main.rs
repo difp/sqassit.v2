@@ -26,6 +26,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db: std::sync::Arc::new(std::sync::Mutex::new(db)),
                 bot_token: token.trim().to_owned(),
                 owner,
+                timezone: env::var("TIMEZONE")
+                    .unwrap_or_else(|_| "Europe/Moscow".to_owned())
+                    .parse()?,
             })
         }
         (Err(_), Err(_)) => None,
