@@ -304,6 +304,23 @@ pub async fn refresh<T: BotTransport>(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| NotifyError::Database)?
     };
+    let personal = {
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        let mut stmt=db.prepare("SELECT n.id,n.message_id,n.text,n.chat_id,b.status FROM event_notifications n JOIN bookings b ON b.training_id=n.entity_id AND b.user_id=n.user_id WHERE n.entity_id=?1 AND n.kind='training' AND n.user_id!=0 AND n.message_id!=0").map_err(|_|NotifyError::Database)?;
+        let rows = stmt
+            .query_map([training], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|_| NotifyError::Database)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| NotifyError::Database)?
+    };
     let mut failed = false;
     for (id, kind, message, phase, old, chat, status) in rows {
         let text = match (kind.as_str(), status.as_str()) {
@@ -313,6 +330,32 @@ pub async fn refresh<T: BotTransport>(
             ("training_reminder", "booked") => s.reminder.clone(),
             _ => continue,
         };
+        if text == old {
+            continue;
+        }
+        let result = bot
+            .request(
+                "editMessageText",
+                json!({"chat_id":chat,"message_id":message,"text":text,"parse_mode":"HTML"}),
+            )
+            .await;
+        if !matches!(result, Ok(_) | Err(TelegramError::NotModified)) {
+            failed = true;
+            continue;
+        }
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        db.execute("UPDATE event_notifications SET text=?1,updated_at=?2 WHERE id=?3 AND message_id=?4 AND text=?5",params![text,now,id,message,old]).map_err(|_|NotifyError::Database)?;
+    }
+    // Personal cards follow the participant's latest status, including
+    // cancelled/rejected, exactly like the Python refresh.
+    for (id, message, old, chat, status) in personal {
+        let text = format!(
+            "{}\n\n{}\n{}\n{}",
+            training_notify::status_text(&status),
+            s.player_header,
+            s.date,
+            s.roster
+        );
         if text == old {
             continue;
         }

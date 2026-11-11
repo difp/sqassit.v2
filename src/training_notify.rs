@@ -429,47 +429,6 @@ pub async fn notify<T: BotTransport>(
         failed = true;
     }
     // Refresh existing participant cards without creating new messages for others.
-    let existing = {
-        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-        let mut stmt=db.prepare("SELECT b.user_id,b.status FROM bookings b JOIN event_notifications n ON n.kind='training' AND n.entity_id=b.training_id AND n.chat_id=b.user_id AND n.user_id=b.user_id WHERE b.training_id=?1 AND b.user_id!=?2 AND b.status IN ('pending','booked','waitlist')").map_err(|_|NotifyError::Database)?;
-        let rows = stmt
-            .query_map(params![training, user], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(|_| NotifyError::Database)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| NotifyError::Database)?
-    };
-    for (other, other_status) in existing {
-        if allowed(p, other)? {
-            let text = format!(
-                "{}\n\n{}\n{}\n{}",
-                status_text(&other_status),
-                s.player_header,
-                s.date,
-                s.roster
-            );
-            if notifier
-                .send(
-                    p,
-                    bot,
-                    EventMessage {
-                        kind: "training",
-                        entity: training,
-                        chat: other,
-                        user: other,
-                        text: &text,
-                        markup: None,
-                        now,
-                    },
-                )
-                .await
-                .is_err()
-            {
-                failed = true;
-            }
-        }
-    }
     let actor_name = if let Some(actor) = actor {
         let db = p.db.lock().map_err(|_| NotifyError::Database)?;
         let value: Option<(Option<String>, String)> = db
