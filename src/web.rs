@@ -23,6 +23,7 @@ pub struct WebState {
     pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
     pub messages: Option<crate::messages::Messages>,
     pub match_api: crate::match_api::MatchApi,
+    pub event_notifier: crate::event_notify::EventNotifier,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -500,11 +501,7 @@ async fn match_join(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| {
-        api.attendance(&p, &i, n, id, crate::match_api::Action::Join)
-    })
-    .await
+    match_attendance(state, headers, id, crate::match_api::Action::Join).await
 }
 async fn match_create(
     State(state): State<WebState>,
@@ -584,33 +581,121 @@ async fn match_leave(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| {
-        api.attendance(&p, &i, n, id, crate::match_api::Action::Leave)
-    })
-    .await
+    match_attendance(state, headers, id, crate::match_api::Action::Leave).await
 }
 async fn match_approve(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path((id, user)): Path<(i64, i64)>,
 ) -> Response {
-    let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| {
-        api.attendance(&p, &i, n, id, crate::match_api::Action::Approve(user))
-    })
-    .await
+    match_attendance(state, headers, id, crate::match_api::Action::Approve(user)).await
 }
 async fn match_reject(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path((id, user)): Path<(i64, i64)>,
 ) -> Response {
-    let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| {
-        api.attendance(&p, &i, n, id, crate::match_api::Action::Reject(user))
+    match_attendance(state, headers, id, crate::match_api::Action::Reject(user)).await
+}
+async fn match_attendance(
+    state: WebState,
+    headers: HeaderMap,
+    id: i64,
+    action: crate::match_api::Action,
+) -> Response {
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let api = state.match_api;
+    let init = init_data(&headers);
+    let worker_profiles = profiles.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let timestamp = now();
+        let actor = worker_profiles.user_id(&init, timestamp)?.0;
+        let (value, promoted) = api.attendance(&worker_profiles, &init, timestamp, id, action)?;
+        Ok::<_, crate::profile::ProfileError>((value, promoted, actor))
     })
-    .await
+    .await;
+    match result {
+        Ok(Ok((value, promoted, actor))) => {
+            if let Some(bot) = state.bot {
+                let notifier = state.event_notifier;
+                let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let (target, status, change) = match action {
+                    crate::match_api::Action::Join if status == "pending" => (
+                        actor,
+                        "pending".to_owned(),
+                        crate::match_notify::Change::Request,
+                    ),
+                    crate::match_api::Action::Join => (
+                        actor,
+                        "joined".to_owned(),
+                        crate::match_notify::Change::Event,
+                    ),
+                    crate::match_api::Action::Leave => {
+                        (actor, "left".to_owned(), crate::match_notify::Change::Event)
+                    }
+                    crate::match_api::Action::Approve(target) => (
+                        target,
+                        status.to_owned(),
+                        crate::match_notify::Change::Event,
+                    ),
+                    crate::match_api::Action::Reject(target) => (
+                        target,
+                        "rejected".to_owned(),
+                        crate::match_notify::Change::Event,
+                    ),
+                };
+                tokio::spawn(async move {
+                    if crate::match_notify::notify(
+                        &profiles,
+                        &bot.client,
+                        &notifier,
+                        crate::match_notify::MatchChange {
+                            base: &bot.base_url,
+                            id,
+                            user: target,
+                            status: &status,
+                            change,
+                            now: now(),
+                        },
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("Match notification delivery failed");
+                    }
+                    if let Some(target) = promoted {
+                        if crate::match_notify::notify(
+                            &profiles,
+                            &bot.client,
+                            &notifier,
+                            crate::match_notify::MatchChange {
+                                base: &bot.base_url,
+                                id,
+                                user: target,
+                                status: "promoted",
+                                change: crate::match_notify::Change::Event,
+                                now: now(),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            eprintln!("Match promotion notification delivery failed");
+                        }
+                    }
+                });
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 async fn api_cancel(
     State(state): State<WebState>,
@@ -927,6 +1012,7 @@ pub fn router(
             avatar,
             messages,
             match_api: crate::match_api::MatchApi::default(),
+            event_notifier: crate::event_notify::EventNotifier::default(),
         })
 }
 
@@ -1890,6 +1976,7 @@ mod tests {
             bot: None,
             messages: None,
             match_api: crate::match_api::MatchApi::default(),
+            event_notifier: crate::event_notify::EventNotifier::default(),
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),

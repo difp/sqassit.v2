@@ -16,6 +16,7 @@ pub mod identity;
 pub mod match_api;
 pub mod match_booking;
 pub mod match_list;
+pub mod match_notify;
 pub mod messages;
 pub mod profile;
 pub mod rate_limit;

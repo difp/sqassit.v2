@@ -186,7 +186,7 @@ impl MatchApi {
         now: i64,
         match_id: i64,
         action: Action,
-    ) -> Result<Value, ProfileError> {
+    ) -> Result<(Value, Option<i64>), ProfileError> {
         let (actor, user) = profiles.user_id(init, now)?;
         if matches!(action, Action::Join | Action::Leave) {
             self.limiter
@@ -246,21 +246,21 @@ impl MatchApi {
                 if status == "full" {
                     return Err(ProfileError::Rule(409, "Мест нет"));
                 }
-                Ok(json!({"ok":true,"status":status}))
+                Ok((json!({"ok":true,"status":status}), None))
             }
             Action::Leave => {
-                let (removed, _) = match_booking::leave(&mut db, match_id, actor)
+                let (removed, promoted) = match_booking::leave(&mut db, match_id, actor)
                     .map_err(|_| ProfileError::Storage)?;
                 if !removed {
                     return Err(ProfileError::Rule(400, "Вы не участвуете в этом матче"));
                 }
-                Ok(json!({"ok":true}))
+                Ok((json!({"ok":true}), promoted))
             }
             Action::Approve(target) => {
                 let status = match_booking::approve(&mut db, match_id, target, actor, now)
                     .map_err(|_| ProfileError::Storage)?
                     .ok_or(ProfileError::Rule(404, "Заявка не найдена"))?;
-                Ok(json!({"ok":true,"status":status}))
+                Ok((json!({"ok":true,"status":status}), None))
             }
             Action::Reject(target) => {
                 if !match_booking::reject(&db, match_id, target, actor, now)
@@ -268,7 +268,7 @@ impl MatchApi {
                 {
                     return Err(ProfileError::Rule(404, "Заявка не найдена"));
                 }
-                Ok(json!({"ok":true}))
+                Ok((json!({"ok":true}), None))
             }
         }
     }
