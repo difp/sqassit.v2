@@ -117,6 +117,11 @@ where
         Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
             (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
         }
+        Ok(Err(crate::profile::ProfileError::Invalid(message))) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"ok":false,"error":message})),
+        )
+            .into_response(),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"detail":"Внутренняя ошибка сервера"})),
@@ -137,6 +142,16 @@ async fn api_notifications(
 ) -> Response {
     profile_work(state, headers, move |p, i, n| {
         p.notifications(&i, n, payload)
+    })
+    .await
+}
+async fn api_update_profile(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::profile::PlayerProfile>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        p.update_profile(&i, n, payload)
     })
     .await
 }
@@ -176,6 +191,7 @@ pub fn router(
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
         .route("/api/me/onboarding", post(api_onboarding))
+        .route("/api/me/profile", put(api_update_profile))
         .route("/api/me/notifications", put(api_notifications))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -316,6 +332,30 @@ mod tests {
         let (_, body) = send(app.clone(), "GET", "/api/me", &signed, "").await;
         assert_eq!(body["user"]["onboarding_seen"], true);
         assert_eq!(body["user"]["notify_messages"], false);
+        let (status, body) = send(
+            app.clone(),
+            "PUT",
+            "/api/me/profile",
+            &signed,
+            r#"{"about":"  Люблю сквош  ","display_mode":"animal","phone":"+7 (999) 123-45-67"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["profile"]["about"], "Люблю сквош");
+        assert_eq!(body["profile"]["display_mode"], "animal");
+        assert_eq!(body["profile"]["phone"], "+79991234567");
+        assert_eq!(body["profile"]["notify_messages"], false);
+        let (status, _) = send(
+            app.clone(),
+            "PUT",
+            "/api/me/profile",
+            &signed,
+            r#"{"phone":"123"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, body) = send(app.clone(), "GET", "/api/me", &signed, "").await;
+        assert_eq!(body["user"]["display_mode"], "animal");
         assert_eq!(
             send(app, "GET", "/api/me", &signed.replace("42", "43"), "")
                 .await

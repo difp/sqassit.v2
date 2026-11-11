@@ -18,6 +18,7 @@ pub struct Profiles {
 pub enum ProfileError {
     Unauthorized(&'static str),
     Storage,
+    Invalid(&'static str),
 }
 
 #[derive(Default, Deserialize)]
@@ -26,6 +27,44 @@ pub struct NotificationSettings {
     pub notify_matches: Option<bool>,
     pub notify_trainings: Option<bool>,
     pub notify_messages: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct PlayerProfile {
+    #[serde(default)]
+    pub about: String,
+    #[serde(default = "default_mode")]
+    pub display_mode: String,
+    #[serde(default)]
+    pub show_username: bool,
+    pub phone: Option<String>,
+    pub notifications_enabled: Option<bool>,
+    pub notify_matches: Option<bool>,
+    pub notify_trainings: Option<bool>,
+    pub notify_messages: Option<bool>,
+}
+fn default_mode() -> String {
+    "name".into()
+}
+fn normalize_phone(phone: &str) -> Result<String, ProfileError> {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    if phone.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let cleaned: String = phone
+        .trim()
+        .chars()
+        .filter(|c| *c == '+' || get_general_category(*c) == GeneralCategory::DecimalNumber)
+        .collect();
+    let digits = cleaned.strip_prefix('+').unwrap_or(&cleaned);
+    if !(10..=15).contains(&digits.chars().count())
+        || !digits
+            .chars()
+            .all(|c| get_general_category(c) == GeneralCategory::DecimalNumber)
+    {
+        return Err(ProfileError::Invalid("Введите телефон из 10–15 цифр."));
+    }
+    Ok(cleaned)
 }
 
 impl Profiles {
@@ -124,5 +163,28 @@ impl Profiles {
         self.register(&db, id, &user, now)?;
         db.execute("UPDATE users SET notifications_enabled=COALESCE(?1,notifications_enabled),notify_matches=COALESCE(?2,notify_matches),notify_trainings=COALESCE(?3,notify_trainings),notify_messages=COALESCE(?4,notify_messages) WHERE telegram_id=?5",params![settings.enabled,settings.notify_matches,settings.notify_trainings,settings.notify_messages,id]).map_err(|_| ProfileError::Storage)?;
         db.query_row("SELECT notifications_enabled,notify_matches,notify_trainings,notify_messages FROM users WHERE telegram_id=?1",[id],|r| Ok(json!({"ok":true,"notifications_enabled":r.get::<_,bool>(0)?,"notify_matches":r.get::<_,bool>(1)?,"notify_trainings":r.get::<_,bool>(2)?,"notify_messages":r.get::<_,bool>(3)?}))).map_err(|_|ProfileError::Storage)
+    }
+    pub fn update_profile(
+        &self,
+        init: &str,
+        now: i64,
+        profile: PlayerProfile,
+    ) -> Result<Value, ProfileError> {
+        let (id, user) = self.user_id(init, now)?;
+        if profile.about.chars().count() > 450
+            || profile
+                .phone
+                .as_ref()
+                .is_some_and(|p| p.chars().count() > 32)
+            || !matches!(profile.display_mode.as_str(), "name" | "animal")
+        {
+            return Err(ProfileError::Invalid("Некорректные данные профиля."));
+        }
+        let phone = profile.phone.as_deref().map(normalize_phone).transpose()?;
+        let db = self.db.lock().map_err(|_| ProfileError::Storage)?;
+        self.register(&db, id, &user, now)?;
+        db.execute("UPDATE users SET about=?1,display_mode=?2,show_username=?3,phone=COALESCE(?4,phone),notifications_enabled=COALESCE(?5,notifications_enabled),notify_matches=COALESCE(?6,notify_matches),notify_trainings=COALESCE(?7,notify_trainings),notify_messages=COALESCE(?8,notify_messages) WHERE telegram_id=?9",params![profile.about.trim(),profile.display_mode,profile.show_username,phone,profile.notifications_enabled,profile.notify_matches,profile.notify_trainings,profile.notify_messages,id]).map_err(|_|ProfileError::Storage)?;
+        let (emoji, name) = identity::animal_identity(id);
+        db.query_row("SELECT about,display_mode,show_username,phone,notifications_enabled,notify_matches,notify_trainings,notify_messages FROM users WHERE telegram_id=?1",[id],|r| Ok(json!({"ok":true,"profile":{"about":r.get::<_,String>(0)?,"display_mode":r.get::<_,String>(1)?,"show_username":r.get::<_,bool>(2)?,"phone":r.get::<_,String>(3)?,"notifications_enabled":r.get::<_,bool>(4)?,"notify_matches":r.get::<_,bool>(5)?,"notify_trainings":r.get::<_,bool>(6)?,"notify_messages":r.get::<_,bool>(7)?,"animal":{"emoji":emoji,"name":name}}}))).map_err(|_|ProfileError::Storage)
     }
 }
