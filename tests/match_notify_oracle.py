@@ -69,6 +69,16 @@ async def run():
                 (now + 10, now + 20, now + 30),
             )
             await db._execute(
+                "INSERT INTO matches(id,title,location,start_at,duration_min,max_players,"
+                "created_by,created_at) VALUES (2,'Promo','Hall',?,60,2,1,?)",
+                (now + 7200, now),
+            )
+            await db._execute(
+                "INSERT INTO match_players(match_id,user_id,status,created_at) VALUES "
+                "(2,2,'booked',?),(2,6,'pending',?),(2,7,'waitlist',?)",
+                (now + 50, now + 60, now + 70),
+            )
+            await db._execute(
                 "INSERT INTO event_coauthors(event_type,event_id,user_id,added_by,created_at) "
                 "VALUES ('match',1,5,1,?)",
                 (now,),
@@ -84,6 +94,18 @@ async def run():
             await db.delete_match(1)
             match = await db.get_match(1)
             await main._notify_match_deleted(match)
+            await db._execute(
+                "UPDATE match_players SET status='booked' WHERE match_id=2 AND user_id=6"
+            )
+            match = await db.get_match(2)
+            await main._notify_match_event(match, 6, "booked")
+            await db._execute("DELETE FROM match_players WHERE match_id=2 AND user_id=2")
+            await db._execute(
+                "UPDATE match_players SET status='booked' WHERE match_id=2 AND user_id=7"
+            )
+            match = await db.get_match(2)
+            await main._notify_match_event(match, 2, "left")
+            await main._notify_match_event(match, 7, "promoted")
             notifications = await db._fetchall(
                 "SELECT kind,entity_id,chat_id,user_id,message_id,text "
                 "FROM event_notifications ORDER BY chat_id,user_id"

@@ -100,12 +100,20 @@ async fn same_match_notifications_as_python() {
          VALUES(1,'Cup <A&B>','Court & 1',{},60,4,1,{now}); \
          INSERT INTO match_players(match_id,user_id,status,created_at) VALUES \
          (1,2,'booked',{}),(1,4,'booked',{}),(1,6,'pending',{}); \
+         INSERT INTO matches(id,title,location,start_at,duration_min,max_players,created_by,created_at) \
+         VALUES(2,'Promo','Hall',{},60,2,1,{now}); \
+         INSERT INTO match_players(match_id,user_id,status,created_at) VALUES \
+         (2,2,'booked',{}),(2,6,'pending',{}),(2,7,'waitlist',{}); \
          INSERT INTO event_coauthors(event_type,event_id,user_id,added_by,created_at) \
          VALUES('match',1,5,1,{now});",
         now + 7200,
         now + 10,
         now + 20,
-        now + 30
+        now + 30,
+        now + 7200,
+        now + 50,
+        now + 60,
+        now + 70
     ))
     .unwrap();
     let profiles = Profiles {
@@ -185,6 +193,60 @@ async fn same_match_notifications_as_python() {
     .await
     .expect("match deletion notification");
 
+    {
+        let db = profiles.db.lock().unwrap();
+        db.execute(
+            "UPDATE match_players SET status='booked' WHERE match_id=2 AND user_id=6",
+            [],
+        )
+        .unwrap();
+    }
+    sqassit::match_notify::notify(
+        &profiles,
+        &fake,
+        &sqassit::event_notify::EventNotifier::default(),
+        sqassit::match_notify::MatchChange {
+            base: "https://example.test",
+            id: 2,
+            user: 6,
+            status: "booked",
+            change: sqassit::match_notify::Change::Event,
+            now,
+        },
+    )
+    .await
+    .expect("match approval notification");
+    {
+        let db = profiles.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM match_players WHERE match_id=2 AND user_id=2",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE match_players SET status='booked' WHERE match_id=2 AND user_id=7",
+            [],
+        )
+        .unwrap();
+    }
+    for (user, status) in [(2, "left"), (7, "promoted")] {
+        sqassit::match_notify::notify(
+            &profiles,
+            &fake,
+            &sqassit::event_notify::EventNotifier::default(),
+            sqassit::match_notify::MatchChange {
+                base: "https://example.test",
+                id: 2,
+                user,
+                status,
+                change: sqassit::match_notify::Change::Event,
+                now,
+            },
+        )
+        .await
+        .expect("match leave/promotion notification");
+    }
+
     assert_eq!(
         json!(fake.calls.lock().unwrap().clone()),
         expected["calls"],
@@ -194,25 +256,40 @@ async fn same_match_notifications_as_python() {
     assert_eq!(json!(rows(&db)), expected["notifications"], "notifications");
     let deadlines = {
         let mut stmt = db
-            .prepare("SELECT chat_id,delete_at FROM event_notifications ORDER BY chat_id,user_id")
+            .prepare(
+                "SELECT entity_id,chat_id,delete_at FROM event_notifications \
+                 ORDER BY entity_id,chat_id,user_id",
+            )
             .unwrap();
         stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
     };
-    assert_eq!(
-        deadlines,
-        vec![
-            (1, Some(now + 25_200)),
-            (2, Some(now + 25_200)),
-            (3, Some(now + 25_200)),
-            (5, Some(now + 25_200)),
-            // A notification created after deletion falls back to 24 hours.
-            (6, Some(now + 86_400)),
-            (7, Some(now + 25_200)),
-        ]
-    );
+    let expected_deadlines = [
+        (1, 1, now + 25_200),
+        (1, 2, now + 25_200),
+        (1, 3, now + 25_200),
+        (1, 5, now + 25_200),
+        // A notification created after deletion falls back to 24 hours.
+        (1, 6, now + 86_400),
+        (1, 7, now + 25_200),
+        (2, 1, now + 25_200),
+        (2, 2, now + 25_200),
+        (2, 6, now + 25_200),
+        (2, 7, now + 25_200),
+    ];
+    assert_eq!(deadlines.len(), expected_deadlines.len());
+    for ((entity, chat, deadline), (expected_entity, expected_chat, expected)) in
+        deadlines.into_iter().zip(expected_deadlines)
+    {
+        assert_eq!((entity, chat), (expected_entity, expected_chat));
+        assert_eq!(deadline, Some(expected));
+    }
 }
