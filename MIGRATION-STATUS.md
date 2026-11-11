@@ -27,6 +27,8 @@ Reference: SQASSIT `736a779f59d9e13d7e3a0f0401d6dd1c642cfada`, imported under `l
 
 On 2026-11-11 the Python reference tests ran in an isolated Python 3.12 environment: **299 passed, 2 skipped**, with coverage options disabled. The TestClient integration test stalled inside the sandbox and passed outside it. Rust unit tests and Clippy run through the root `Cargo.toml`; CI executes formatting, Clippy and tests.
 
+An opt-in Python/Rust contract test runs a profile, training booking/waitlist/cancellation and match workflow against separate databases and compares HTTP status and JSON. It suppresses Python Telegram tasks and normalizes clock-dependent seconds and scoped tokens. The local run passed outside the sandbox; CI is configured to run it with reference dependencies. This covers only a small subset of the API and does not compare outbound Telegram calls or freeze time.
+
 ## Still required
 
 This is **not a runnable Rust replacement** yet. HTTP routes/templates, the rest of the data access and business logic, bot, notifications/scheduler, operational integration, cross-implementation contract tests and deployment/rollback validation remain to be implemented. Do not deploy this crate in place of the Python application.
