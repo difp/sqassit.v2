@@ -15,6 +15,7 @@ pub mod coach_participants;
 pub mod coach_registry;
 pub mod coauthors;
 pub mod event_notify;
+pub mod feedback;
 pub mod identity;
 pub mod match_api;
 pub mod match_booking;

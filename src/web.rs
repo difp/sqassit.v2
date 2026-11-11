@@ -24,6 +24,7 @@ pub struct WebState {
     pub messages: Option<crate::messages::Messages>,
     pub match_api: crate::match_api::MatchApi,
     pub applications: crate::applications::Applications,
+    pub feedback: crate::feedback::Feedback,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -78,6 +79,47 @@ async fn tabs() -> Response {
 }
 async fn health() -> Json<serde_json::Value> {
     Json(json!({"ok":true}))
+}
+async fn feedback_submit(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::feedback::FeedbackInput>,
+) -> Response {
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let worker = profiles.clone();
+    let service = state.feedback;
+    let init = init_data(&headers);
+    match tokio::task::spawn_blocking(move || service.submit(&worker, &init, now(), body)).await {
+        Ok(Ok(submitted)) => {
+            if let Some(bot) = state.bot {
+                tokio::spawn(async move {
+                    let markup = crate::feedback::markup(&bot.base_url);
+                    if crate::role_notify::notice(
+                        &profiles,
+                        &bot.client,
+                        profiles.owner,
+                        &submitted.text,
+                        Some(markup),
+                        now(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("Feedback notification delivery failed");
+                    }
+                });
+            }
+            Json(json!({"ok":true,"message":"Спасибо! Сообщение отправлено."})).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 // Never claim readiness while bot, scheduler and API are missing.
 async fn ready() -> (StatusCode, Json<serde_json::Value>) {
@@ -1292,6 +1334,7 @@ pub fn router(
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
+        .route("/api/feedback", post(feedback_submit))
         .route("/api/messages/coach", post(player_message))
         .route("/api/messages/thread", get(player_thread))
         .route("/api/coach/messages", get(coach_conversations))
@@ -1411,6 +1454,7 @@ pub fn router(
             messages,
             match_api: crate::match_api::MatchApi::default(),
             applications: crate::applications::Applications::default(),
+            feedback: crate::feedback::Feedback::default(),
         })
 }
 
@@ -1968,6 +2012,42 @@ mod tests {
             let b = to_bytes(r.into_body(), 65536).await.unwrap();
             (status, serde_json::from_slice(&b).unwrap())
         }
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/feedback",
+                "",
+                r#"{"kind":"bug","text":"Ошибка"}"#
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/feedback",
+                &signed,
+                r#"{"kind":"bug","text":"x"}"#
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/feedback",
+                &signed,
+                r#"{"kind":"idea","text":"Улучшить","page":"Тренер"}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
         coach_db.lock().unwrap().execute("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(900,'Room',?1,0,777)",[now()+3600]).unwrap();
         assert_eq!(
             send(app.clone(), "POST", "/api/trainings/900/room", &signed, "")
@@ -2774,6 +2854,7 @@ mod tests {
             messages: None,
             match_api: crate::match_api::MatchApi::default(),
             applications: crate::applications::Applications::default(),
+            feedback: crate::feedback::Feedback::default(),
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
