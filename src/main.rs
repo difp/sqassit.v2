@@ -159,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode,
             secret,
             base_url: base,
+            notifier: sqassit::event_notify::EventNotifier::default(),
         })
     } else {
         None
@@ -219,6 +220,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let feed_task = bot.as_ref().map(|runtime| {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if sqassit::match_feed::refresh(
+                    &runtime.profiles,
+                    &runtime.client,
+                    &runtime.notifier,
+                    now,
+                )
+                .await
+                .is_err()
+                {
+                    eprintln!("Match feed refresh failed; it will be retried");
+                }
+            }
+        })
+    });
     let poll_task = bot
         .as_ref()
         .filter(|v| v.mode == sqassit::updates::BotMode::Polling)
@@ -232,6 +257,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await;
     if let Some(task) = poll_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = feed_task {
         task.abort();
         let _ = task.await;
     }

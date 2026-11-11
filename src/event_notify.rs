@@ -32,6 +32,43 @@ pub struct EventMessage<'a> {
     pub now: i64,
 }
 impl EventNotifier {
+    /// Remove an existing message, retaining the row on retryable transport errors.
+    pub async fn delete<T: BotTransport>(
+        &self,
+        profiles: &Profiles,
+        bot: &T,
+        row_id: i64,
+        expected_message: i64,
+        expected_text: &str,
+    ) -> Result<(), NotifyError> {
+        let _guard = self.lock.lock().await;
+        let record = {
+            let db = profiles.db.lock().map_err(|_| NotifyError::Database)?;
+            db.query_row("SELECT chat_id,message_id FROM event_notifications WHERE id=?1 AND message_id=?2 AND text=?3",params![row_id,expected_message,expected_text],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).optional().map_err(|_|NotifyError::Database)?
+        };
+        let Some((chat, message)) = record else {
+            return Ok(());
+        };
+        if message != 0
+            && matches!(
+                bot.request(
+                    "deleteMessage",
+                    json!({"chat_id":chat,"message_id":message})
+                )
+                .await,
+                Err(TelegramError::Transport | TelegramError::Configuration)
+            )
+        {
+            return Err(NotifyError::Telegram);
+        }
+        let db = profiles.db.lock().map_err(|_| NotifyError::Database)?;
+        db.execute(
+            "DELETE FROM event_notifications WHERE id=?1 AND chat_id=?2 AND message_id=?3",
+            params![row_id, chat, message],
+        )
+        .map_err(|_| NotifyError::Database)?;
+        Ok(())
+    }
     pub async fn send<T: BotTransport>(
         &self,
         profiles: &Profiles,

@@ -15,6 +15,7 @@ pub mod event_notify;
 pub mod identity;
 pub mod match_api;
 pub mod match_booking;
+pub mod match_feed;
 pub mod match_list;
 pub mod match_notify;
 pub mod messages;

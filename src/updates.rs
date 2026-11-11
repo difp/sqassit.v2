@@ -19,6 +19,7 @@ pub struct BotRuntime {
     pub mode: BotMode,
     pub secret: String,
     pub base_url: String,
+    pub notifier: crate::event_notify::EventNotifier,
 }
 
 pub fn validate_webhook(base: &str, secret: &str) -> bool {

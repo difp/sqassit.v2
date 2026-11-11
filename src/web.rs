@@ -23,7 +23,6 @@ pub struct WebState {
     pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
     pub messages: Option<crate::messages::Messages>,
     pub match_api: crate::match_api::MatchApi,
-    pub event_notifier: crate::event_notify::EventNotifier,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -599,7 +598,7 @@ where
         Ok(Ok((value, actor))) => {
             let id = deleted.or_else(|| value.get("id").and_then(|id| id.as_i64()));
             if let (Some(bot), Some(id)) = (state.bot, id) {
-                let notifier = state.event_notifier;
+                let notifier = bot.notifier.clone();
                 tokio::spawn(async move {
                     let (change, status) = if deleted.is_some() {
                         (crate::match_notify::Change::Deleted, "deleted")
@@ -619,6 +618,12 @@ where
                         .is_err()
                     {
                         eprintln!("Match notification delivery failed");
+                    }
+                    if crate::match_feed::publish(&profiles, &bot.client, &notifier, actor, now())
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("Match feed delivery failed");
                     }
                 });
             }
@@ -693,7 +698,7 @@ async fn match_attendance(
     match result {
         Ok(Ok((value, promoted, actor))) => {
             if let Some(bot) = state.bot {
-                let notifier = state.event_notifier;
+                let notifier = bot.notifier.clone();
                 let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 let (target, status, change) = match action {
                     crate::match_api::Action::Join if status == "pending" => (
@@ -1082,7 +1087,6 @@ pub fn router(
             avatar,
             messages,
             match_api: crate::match_api::MatchApi::default(),
-            event_notifier: crate::event_notify::EventNotifier::default(),
         })
 }
 
@@ -1978,6 +1982,7 @@ mod tests {
             mode: crate::updates::BotMode::Webhook,
             secret: secret.into(),
             base_url: "https://example.test".into(),
+            notifier: crate::event_notify::EventNotifier::default(),
         };
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
@@ -2046,7 +2051,6 @@ mod tests {
             bot: None,
             messages: None,
             match_api: crate::match_api::MatchApi::default(),
-            event_notifier: crate::event_notify::EventNotifier::default(),
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
