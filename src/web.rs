@@ -293,6 +293,9 @@ async fn coach_message(
 async fn api_me(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| p.me(&i, n)).await
 }
+async fn account_export(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| crate::account::export(&p, &i, n)).await
+}
 async fn api_public_profile(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1334,6 +1337,7 @@ pub fn router(
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
+        .route("/api/me/export", get(account_export))
         .route("/api/feedback", post(feedback_submit))
         .route("/api/messages/coach", post(player_message))
         .route("/api/messages/thread", get(player_thread))
@@ -2048,6 +2052,13 @@ mod tests {
             .0,
             StatusCode::OK
         );
+        assert_eq!(
+            send(app.clone(), "GET", "/api/me/export", "", "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (_, exported) = send(app.clone(), "GET", "/api/me/export", &signed, "").await;
+        assert_eq!(exported["user"]["telegram_id"], 42);
+        assert_eq!(exported["feedback"][0]["text"], "Улучшить");
         coach_db.lock().unwrap().execute("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(900,'Room',?1,0,777)",[now()+3600]).unwrap();
         assert_eq!(
             send(app.clone(), "POST", "/api/trainings/900/room", &signed, "")

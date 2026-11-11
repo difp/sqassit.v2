@@ -1,6 +1,7 @@
 //! Compatibility components for the SQASSIT Rust migration.
 //! This crate is not yet a replacement for the Python application.
 
+pub mod account;
 pub mod applications;
 pub mod auth;
 pub mod avatar;
