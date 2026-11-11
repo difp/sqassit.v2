@@ -222,6 +222,17 @@ async fn coach_create(
     })
     .await
 }
+async fn coach_edit(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coach::EditTraining>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::edit(&p, &i, n, id, body)
+    })
+    .await
+}
 async fn coach_delete(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -291,7 +302,7 @@ pub fn router(
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
         .route(
             "/api/coach/trainings/{id}",
-            axum::routing::delete(coach_delete),
+            axum::routing::delete(coach_delete).patch(coach_edit),
         )
         .route("/api/coach/trainings/{id}/restore", post(coach_restore))
         .route(
@@ -591,6 +602,14 @@ mod tests {
             .iter()
             .any(|v| v["id"] == created_id));
         let endpoint = format!("/api/coach/trainings/{created_id}");
+        let edit_body =
+            json!({"date":date,"time":"13:00","training_type":"Новое время"}).to_string();
+        assert_eq!(
+            send(coach_app.clone(), "PATCH", &endpoint, &signed, &edit_body)
+                .await
+                .0,
+            StatusCode::OK
+        );
         assert_eq!(
             send(coach_app.clone(), "DELETE", &endpoint, &signed, "")
                 .await

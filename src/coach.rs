@@ -121,6 +121,73 @@ pub fn create(
     tx.commit().map_err(|_| ProfileError::Storage)?;
     Ok(json!({"ok":true,"id":training_id}))
 }
+#[derive(Deserialize)]
+pub struct EditTraining {
+    pub date: String,
+    pub time: String,
+    pub training_type: String,
+}
+pub fn edit(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    training_id: i64,
+    payload: EditTraining,
+) -> Result<Value, ProfileError> {
+    let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let actor = coach(profiles, &db, init, now)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ProfileError::Storage)?;
+    type TrainingForEdit = (i64, i64, String, Option<i64>, Option<i64>, bool);
+    let row:Option<TrainingForEdit>=tx.query_row("SELECT t.start_at,t.duration_min,t.training_type,t.created_by,t.deleted_at,EXISTS(SELECT 1 FROM event_coauthors c WHERE c.event_type='training' AND c.event_id=t.id AND c.user_id=?2) FROM trainings t WHERE t.id=?1",params![training_id,actor],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(|_|ProfileError::Storage)?;
+    let (old_start, duration, old_type, owner, deleted, coauthor) =
+        row.ok_or(ProfileError::Rule(404, "Тренировка не найдена"))?;
+    if deleted.unwrap_or(0) != 0 || (owner != Some(actor) && !coauthor) {
+        return Err(ProfileError::Rule(404, "Тренировка не найдена"));
+    }
+    if old_start <= now {
+        return Err(ProfileError::Rule(
+            400,
+            "Начавшуюся тренировку изменить нельзя",
+        ));
+    }
+    if payload.training_type.is_empty() || payload.training_type.chars().count() > 100 {
+        return Err(ProfileError::Invalid("Некорректные данные тренировки."));
+    }
+    let name = payload.training_type.trim();
+    if name.is_empty() {
+        return Err(ProfileError::Rule(422, "Укажите название тренировки"));
+    }
+    let start = local_timestamp(&payload.date, &payload.time, profiles.timezone)?;
+    if start <= now {
+        return Err(ProfileError::Rule(
+            400,
+            "Нельзя перенести тренировку в прошлое",
+        ));
+    }
+    let duplicate:Option<i64>=tx.query_row("SELECT id FROM trainings WHERE deleted_at IS NULL AND start_at=?1 AND training_type=?2 AND created_by=?3 LIMIT 1",params![start,name,owner],|r|r.get(0)).optional().map_err(|_|ProfileError::Storage)?;
+    if duplicate.is_some_and(|id| id != training_id) {
+        return Err(ProfileError::Rule(
+            409,
+            "Такая тренировка уже есть в расписании.",
+        ));
+    }
+    if start != old_start || name != old_type {
+        let changed = start != old_start;
+        tx.execute("UPDATE trainings SET title=?1,training_type=?1,start_at=?2,reminder_sent=CASE WHEN ?3 THEN 0 ELSE reminder_sent END WHERE id=?4",params![name,start,changed,training_id]).map_err(|_|ProfileError::Storage)?;
+        if changed {
+            tx.execute(
+                "DELETE FROM reminder_deliveries WHERE training_id=?1",
+                [training_id],
+            )
+            .map_err(|_| ProfileError::Storage)?;
+            tx.execute("UPDATE event_notifications SET delete_at=MIN(?1,CASE WHEN sent_at>0 THEN sent_at+47*3600 ELSE ?2 END) WHERE kind='training' AND entity_id=?3",params![start+duration*60+14400,now+86400,training_id]).map_err(|_|ProfileError::Storage)?;
+        }
+    }
+    tx.commit().map_err(|_| ProfileError::Storage)?;
+    Ok(json!({"ok":true}))
+}
 #[derive(Clone, Copy)]
 pub enum Action {
     Delete,
@@ -276,6 +343,54 @@ mod tests {
         );
         assert!(create(&profiles, INIT, 1_000_000, training(true)).is_ok());
         profiles.db.lock().unwrap().execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES (?1,2,'booked',0)",[id]).unwrap();
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO reminder_deliveries(training_id,user_id) VALUES (?1,2)",
+                [id],
+            )
+            .unwrap();
+            db.execute("UPDATE trainings SET reminder_sent=1 WHERE id=?1", [id])
+                .unwrap();
+            db.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,updated_at,sent_at) VALUES ('training',?1,42,1000000,999999)",[id]).unwrap();
+        }
+        let edit_payload = EditTraining {
+            date: "2001-09-11".into(),
+            time: "12:00".into(),
+            training_type: "Перенос".into(),
+        };
+        edit(&profiles, INIT, 1_000_000, id, edit_payload).unwrap();
+        {
+            let db = profiles.db.lock().unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT reminder_sent FROM trainings WHERE id=?1",
+                    [id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM reminder_deliveries WHERE training_id=?1",
+                    [id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT delete_at FROM event_notifications WHERE entity_id=?1",
+                    [id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1_169_199
+            );
+        }
+
         assert_eq!(
             lifecycle(&profiles, INIT, 1_000_000, id, Action::Delete).unwrap()["restorable"],
             true
