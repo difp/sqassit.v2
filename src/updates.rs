@@ -22,6 +22,30 @@ pub struct BotRuntime {
     pub notifier: crate::event_notify::EventNotifier,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum PollingSetupError {
+    WebhookActive,
+    Unavailable,
+}
+
+/// Telegram refuses getUpdates while a webhook is registered. Check without
+/// changing the bot's existing webhook or dropping queued updates.
+pub async fn check_polling_ready<T: BotTransport>(bot: &T) -> Result<(), PollingSetupError> {
+    let info = bot
+        .request("getWebhookInfo", json!({}))
+        .await
+        .map_err(|_| PollingSetupError::Unavailable)?;
+    let url = info
+        .pointer("/result/url")
+        .and_then(Value::as_str)
+        .ok_or(PollingSetupError::Unavailable)?;
+    if url.is_empty() {
+        Ok(())
+    } else {
+        Err(PollingSetupError::WebhookActive)
+    }
+}
+
 pub fn validate_webhook(base: &str, secret: &str) -> bool {
     let normalized = secret.trim().to_ascii_lowercase();
     !base.trim().is_empty()
@@ -139,6 +163,37 @@ mod tests {
         async fn request(&self, _: &str, _: Value) -> Result<Value, TelegramError> {
             *self.0.lock().unwrap() += 1;
             Ok(json!({"ok":true,"result":{"message_id":1}}))
+        }
+    }
+    #[tokio::test]
+    async fn polling_setup_checks_webhook_without_changing_it() {
+        struct WebhookInfo {
+            url: Option<&'static str>,
+            calls: Mutex<Vec<String>>,
+        }
+        impl BotTransport for WebhookInfo {
+            async fn request(&self, method: &str, _: Value) -> Result<Value, TelegramError> {
+                self.calls.lock().unwrap().push(method.to_owned());
+                match self.url {
+                    Some(url) => Ok(json!({"ok":true,"result":{"url":url}})),
+                    None => Err(TelegramError::Transport),
+                }
+            }
+        }
+        for (url, expected) in [
+            (Some(""), Ok(())),
+            (
+                Some("https://example.test/webhook"),
+                Err(PollingSetupError::WebhookActive),
+            ),
+            (None, Err(PollingSetupError::Unavailable)),
+        ] {
+            let bot = WebhookInfo {
+                url,
+                calls: Mutex::new(Vec::new()),
+            };
+            assert_eq!(check_polling_ready(&bot).await, expected);
+            assert_eq!(*bot.calls.lock().unwrap(), vec!["getWebhookInfo"]);
         }
     }
     fn service() -> Profiles {

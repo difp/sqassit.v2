@@ -142,6 +142,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client =
             sqassit::telegram::TelegramClient::new(service.bot_token.clone(), Some(&proxy))
                 .map_err(|_| "Invalid Telegram client or BOT_PROXY")?;
+        if mode == sqassit::updates::BotMode::Polling {
+            match sqassit::updates::check_polling_ready(&client).await {
+                Ok(()) => {}
+                Err(sqassit::updates::PollingSetupError::WebhookActive) => return Err("Polling cannot start while a Telegram webhook is registered; remove or switch it deliberately first".into()),
+                Err(sqassit::updates::PollingSetupError::Unavailable) => return Err("Cannot check Telegram webhook status; polling was not started".into()),
+            }
+        }
         let register = matches!(
             env::var("SQASSIT_REGISTER_WEBHOOK")
                 .unwrap_or_default()
