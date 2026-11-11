@@ -32,7 +32,7 @@ fn authorize(
 pub fn list(profiles: &Profiles, init: &str, now: i64, id: i64) -> Result<Value, ProfileError> {
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     let (actor, creator) = authorize(profiles, init, now, id, &db)?;
-    let mut stmt=db.prepare("SELECT u.telegram_id,u.first_name,u.username,u.avatar_file_id FROM event_coauthors c JOIN users u ON u.telegram_id=c.user_id WHERE c.event_type='match' AND c.event_id=?1 ORDER BY c.created_at ASC").map_err(|_|ProfileError::Storage)?;
+    let mut stmt=db.prepare("SELECT u.telegram_id,u.first_name,u.username,u.avatar_file_id FROM event_coauthors c JOIN users u ON u.telegram_id=c.user_id WHERE c.event_type='match' AND c.event_id=?1 ORDER BY c.created_at ASC, c.user_id ASC").map_err(|_|ProfileError::Storage)?;
     let rows = stmt
         .query_map([id], |r| {
             Ok((
@@ -147,7 +147,7 @@ pub fn training_list(
 ) -> Result<Value, ProfileError> {
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     let (actor, creator) = training_authorize(profiles, &db, init, now, id)?;
-    let mut stmt=db.prepare("SELECT u.telegram_id,u.first_name,u.username,u.avatar_file_id FROM event_coauthors c JOIN users u ON u.telegram_id=c.user_id WHERE c.event_type='training' AND c.event_id=?1 ORDER BY c.created_at ASC").map_err(|_|ProfileError::Storage)?;
+    let mut stmt=db.prepare("SELECT u.telegram_id,u.first_name,u.username,u.avatar_file_id FROM event_coauthors c JOIN users u ON u.telegram_id=c.user_id WHERE c.event_type='training' AND c.event_id=?1 ORDER BY c.created_at ASC, c.user_id ASC").map_err(|_|ProfileError::Storage)?;
     let rows = stmt
         .query_map([id], |r| {
             Ok((

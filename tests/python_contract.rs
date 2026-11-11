@@ -227,6 +227,105 @@ async fn same_profile_and_training_workflow_as_python() {
         ("GET", "/api/coach/messages/42", 43, None),
         ("GET", "/api/coach/players", 123, None),
         ("PUT", "/api/coach/players/42/notes", 123, Some(json!({}))),
+        // Coach registry, club view, applications, coauthors and transfer.
+        ("GET", "/api/coach/coaches", 123, None),
+        ("GET", "/api/coach/club/trainings", 123, None),
+        (
+            "POST",
+            "/api/coach/apply",
+            43,
+            Some(json!({"message":"Хочу тренировать"})),
+        ),
+        ("GET", "/api/coach/apply", 43, None),
+        ("GET", "/api/coach/applications", 123, None),
+        ("POST", "/api/coach/applications/43/approve", 123, None),
+        ("GET", "/api/coach/apply", 43, None),
+        ("GET", "/api/coach/coaches", 43, None),
+        (
+            "PATCH",
+            "/api/coach/coaches/43/manager",
+            123,
+            Some(json!({"enabled":true})),
+        ),
+        ("GET", "/api/coach/coaches", 123, None),
+        ("DELETE", "/api/coach/coaches/123", 123, None),
+        ("DELETE", "/api/coach/coaches/43", 123, None),
+        ("GET", "/api/coach/coaches", 123, None),
+        (
+            "POST",
+            "/api/coach/coaches",
+            123,
+            Some(json!({"telegram_id":43})),
+        ),
+        ("GET", "/api/coach/coaches", 43, None),
+        ("GET", "/api/coach/trainings/1/coauthors", 123, None),
+        (
+            "POST",
+            "/api/coach/trainings/1/coauthors",
+            123,
+            Some(json!({"telegram_id":43})),
+        ),
+        ("GET", "/api/coach/trainings/1/coauthors", 123, None),
+        ("DELETE", "/api/coach/trainings/1/coauthors/43", 123, None),
+        ("GET", "/api/coach/trainings/1/coauthors", 123, None),
+        (
+            "POST",
+            "/api/coach/trainings/1/transfer",
+            123,
+            Some(json!({"telegram_id":43})),
+        ),
+        ("GET", "/api/coach/trainings", 43, None),
+        (
+            "POST",
+            "/api/coach/trainings/1/transfer",
+            43,
+            Some(json!({"telegram_id":123})),
+        ),
+        ("GET", "/api/coach/trainings", 123, None),
+        (
+            "POST",
+            "/api/matches",
+            42,
+            Some(json!({"date":date,"time":"15:00","title":"Second match"})),
+        ),
+        (
+            "POST",
+            "/api/matches/2/coauthors",
+            42,
+            Some(json!({"telegram_id":43})),
+        ),
+        ("GET", "/api/matches/2/coauthors", 43, None),
+        ("DELETE", "/api/matches/2/coauthors/43", 42, None),
+        ("DELETE", "/api/matches/2", 42, None),
+        (
+            "POST",
+            "/api/coach/apply",
+            44,
+            Some(json!({"message":"Ещё заявка"})),
+        ),
+        ("GET", "/api/coach/applications", 123, None),
+        ("POST", "/api/coach/applications/44/reject", 123, None),
+        ("GET", "/api/coach/apply", 44, None),
+        ("POST", "/api/coach/applications/44/approve", 123, None),
+        ("DELETE", "/api/coach/coaches/44", 123, None),
+        ("GET", "/api/coach/coaches", 42, None),
+        ("GET", "/api/coach/players/count", 123, None),
+        // Feedback, export and confirmed account deletion.
+        (
+            "POST",
+            "/api/feedback",
+            42,
+            Some(json!({"kind":"idea","text":"  Идея  ","page":"Матч"})),
+        ),
+        ("GET", "/api/me/export", 42, None),
+        (
+            "POST",
+            "/api/feedback",
+            42,
+            Some(json!({"kind":"bug","text":"ok","page":"unknown"})),
+        ),
+        ("DELETE", "/api/me", 44, None),
+        ("DELETE", "/api/me?confirm=true", 44, None),
     ];
     assert_eq!(scenarios.len(), expected_responses.len());
     for ((method, path, id, body), mut reference) in scenarios.into_iter().zip(expected_responses) {
@@ -240,6 +339,8 @@ async fn same_profile_and_training_workflow_as_python() {
                         "Coach"
                     } else if id == 43 {
                         "Second"
+                    } else if id == 44 {
+                        "Applicant"
                     } else {
                         "Player"
                     },
@@ -273,6 +374,10 @@ async fn same_profile_and_training_workflow_as_python() {
         ("matches", "SELECT id,title,description,location,start_at,duration_min,max_players,level,created_by,deleted_at FROM matches ORDER BY id"),
         ("match_players", "SELECT match_id,user_id,status FROM match_players ORDER BY match_id,user_id"),
         ("messages", "SELECT id,from_user,to_user,text FROM messages ORDER BY id"),
+        ("coaches", "SELECT telegram_id,added_by,is_manager FROM coaches ORDER BY telegram_id"),
+        ("coach_applications", "SELECT telegram_id,message,status,decided_by FROM coach_applications ORDER BY telegram_id"),
+        ("event_coauthors", "SELECT event_type,event_id,user_id,added_by FROM event_coauthors ORDER BY event_type,event_id,user_id"),
+        ("feedback", "SELECT user_id,kind,text,page FROM feedback ORDER BY id"),
     ];
     let db = profiles.db.lock().unwrap();
     for (name, sql) in queries {

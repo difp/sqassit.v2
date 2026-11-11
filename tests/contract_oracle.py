@@ -37,12 +37,18 @@ async def run():
     with tempfile.TemporaryDirectory(prefix="sqassit-contract-") as directory:
         await db.connect(os.path.join(directory, "reference.sqlite"))
         try:
-            await db.ensure_coach(123)
+            # Seed the owner coach in a previous hour so registry ordering does not
+            # depend on whether the reference and candidate cross a second boundary.
+            await db._execute(
+                "INSERT OR IGNORE INTO coaches (telegram_id, created_at) VALUES (?, ?)",
+                (123, now - 3600),
+            )
             await db.upsert_user(telegram_id=123, username=None, first_name="Тренер", is_coach=True)
             headers = {
                 "coach": {"X-Init-Data": signed({"id":123,"first_name":"Coach"}, now)},
                 "player": {"X-Init-Data": signed({"id":42,"first_name":"Player"}, now)},
                 "player2": {"X-Init-Data": signed({"id":43,"first_name":"Second"}, now)},
+                "applicant": {"X-Init-Data": signed({"id":44,"first_name":"Applicant"}, now)},
                 "none": {},
             }
             scenarios = [
@@ -94,6 +100,50 @@ async def run():
                 ("GET", "/api/coach/messages/42", "player2", None),
                 ("GET", "/api/coach/players", "coach", None),
                 ("PUT", "/api/coach/players/42/notes", "coach", {}),
+                # Coach registry, club view, applications, coauthors and transfer.
+                ("GET", "/api/coach/coaches", "coach", None),
+                ("GET", "/api/coach/club/trainings", "coach", None),
+                ("POST", "/api/coach/apply", "player2", {"message":"Хочу тренировать"}),
+                ("GET", "/api/coach/apply", "player2", None),
+                ("GET", "/api/coach/applications", "coach", None),
+                ("POST", "/api/coach/applications/43/approve", "coach", None),
+                ("GET", "/api/coach/apply", "player2", None),
+                ("GET", "/api/coach/coaches", "player2", None),
+                ("PATCH", "/api/coach/coaches/43/manager", "coach", {"enabled":True}),
+                ("GET", "/api/coach/coaches", "coach", None),
+                ("DELETE", "/api/coach/coaches/123", "coach", None),
+                ("DELETE", "/api/coach/coaches/43", "coach", None),
+                ("GET", "/api/coach/coaches", "coach", None),
+                ("POST", "/api/coach/coaches", "coach", {"telegram_id":43}),
+                ("GET", "/api/coach/coaches", "player2", None),
+                ("GET", "/api/coach/trainings/1/coauthors", "coach", None),
+                ("POST", "/api/coach/trainings/1/coauthors", "coach", {"telegram_id":43}),
+                ("GET", "/api/coach/trainings/1/coauthors", "coach", None),
+                ("DELETE", "/api/coach/trainings/1/coauthors/43", "coach", None),
+                ("GET", "/api/coach/trainings/1/coauthors", "coach", None),
+                ("POST", "/api/coach/trainings/1/transfer", "coach", {"telegram_id":43}),
+                ("GET", "/api/coach/trainings", "player2", None),
+                ("POST", "/api/coach/trainings/1/transfer", "player2", {"telegram_id":123}),
+                ("GET", "/api/coach/trainings", "coach", None),
+                ("POST", "/api/matches", "player", {"date":date,"time":"15:00","title":"Second match"}),
+                ("POST", "/api/matches/2/coauthors", "player", {"telegram_id":43}),
+                ("GET", "/api/matches/2/coauthors", "player2", None),
+                ("DELETE", "/api/matches/2/coauthors/43", "player", None),
+                ("DELETE", "/api/matches/2", "player", None),
+                ("POST", "/api/coach/apply", "applicant", {"message":"Ещё заявка"}),
+                ("GET", "/api/coach/applications", "coach", None),
+                ("POST", "/api/coach/applications/44/reject", "coach", None),
+                ("GET", "/api/coach/apply", "applicant", None),
+                ("POST", "/api/coach/applications/44/approve", "coach", None),
+                ("DELETE", "/api/coach/coaches/44", "coach", None),
+                ("GET", "/api/coach/coaches", "player", None),
+                ("GET", "/api/coach/players/count", "coach", None),
+                # Feedback, export and confirmed account deletion.
+                ("POST", "/api/feedback", "player", {"kind":"idea","text":"  Идея  ","page":"Матч"}),
+                ("GET", "/api/me/export", "player", None),
+                ("POST", "/api/feedback", "player", {"kind":"bug","text":"ok","page":"unknown"}),
+                ("DELETE", "/api/me", "applicant", None),
+                ("DELETE", "/api/me?confirm=true", "applicant", None),
             ]
             async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=main.app), base_url="http://reference") as client:
                 result = []
@@ -107,6 +157,10 @@ async def run():
                 "matches": "SELECT id,title,description,location,start_at,duration_min,max_players,level,created_by,deleted_at FROM matches ORDER BY id",
                 "match_players": "SELECT match_id,user_id,status FROM match_players ORDER BY match_id,user_id",
                 "messages": "SELECT id,from_user,to_user,text FROM messages ORDER BY id",
+                "coaches": "SELECT telegram_id,added_by,is_manager FROM coaches ORDER BY telegram_id",
+                "coach_applications": "SELECT telegram_id,message,status,decided_by FROM coach_applications ORDER BY telegram_id",
+                "event_coauthors": "SELECT event_type,event_id,user_id,added_by FROM event_coauthors ORDER BY event_type,event_id,user_id",
+                "feedback": "SELECT user_id,kind,text,page FROM feedback ORDER BY id",
             }
             state = {key: [dict(row) for row in await db._fetchall(query)] for key, query in queries.items()}
             print(json.dumps({"responses":result,"state":state}, ensure_ascii=False))

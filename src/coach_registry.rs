@@ -62,7 +62,7 @@ fn resolve(db: &Connection, value: CoachInput) -> Result<Option<i64>, ProfileErr
 pub fn list(profiles: &Profiles, init: &str, now: i64) -> Result<Value, ProfileError> {
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     coach::coach(profiles, &db, init, now)?;
-    let mut stmt=db.prepare("SELECT c.telegram_id,c.is_manager,u.first_name,u.username,u.show_username,u.avatar_file_id FROM coaches c LEFT JOIN users u ON u.telegram_id=c.telegram_id ORDER BY c.created_at ASC").map_err(|_|ProfileError::Storage)?;
+    let mut stmt=db.prepare("SELECT c.telegram_id,c.is_manager,u.first_name,u.username,u.show_username,u.avatar_file_id FROM coaches c LEFT JOIN users u ON u.telegram_id=c.telegram_id ORDER BY c.created_at ASC, c.telegram_id ASC").map_err(|_|ProfileError::Storage)?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
