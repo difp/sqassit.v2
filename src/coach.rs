@@ -39,7 +39,12 @@ pub struct NewTraining {
     #[serde(default)]
     pub force: bool,
 }
-fn coach(profiles: &Profiles, db: &Connection, init: &str, now: i64) -> Result<i64, ProfileError> {
+pub(crate) fn coach(
+    profiles: &Profiles,
+    db: &Connection,
+    init: &str,
+    now: i64,
+) -> Result<i64, ProfileError> {
     let (id, user) = profiles.user_id(init, now)?;
     profiles.register(db, id, &user, now)?;
     let allowed: bool = id == profiles.owner
@@ -334,6 +339,36 @@ mod tests {
         let shared = items.iter().find(|r| r["id"] == 500).unwrap();
         assert_eq!(shared["is_owner"], false);
         assert_eq!(shared["can_manage"], true);
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute("INSERT INTO users(telegram_id,first_name,username,display_mode,created_at) VALUES (99,'Скрыто','moderator_visible','animal',0)",[]).unwrap();
+            db.execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES (500,99,'pending',0)",[]).unwrap();
+        }
+        let listed = crate::coach_participants::list(&profiles, INIT, 1_000_000, 500).unwrap();
+        assert_eq!(listed["participants"][0]["anonymous"], true);
+        assert_ne!(listed["participants"][0]["first_name"], "Скрыто");
+        assert_eq!(listed["participants"][0]["username"], "moderator_visible");
+        let approved = crate::coach_participants::change(
+            &profiles,
+            INIT,
+            1_000_000,
+            500,
+            99,
+            crate::coach_participants::Action::Approve,
+        )
+        .unwrap();
+        assert_eq!(approved["status"], "booked");
+        assert!(matches!(
+            crate::coach_participants::change(
+                &profiles,
+                INIT,
+                1_000_000,
+                500,
+                99,
+                crate::coach_participants::Action::Cancel
+            ),
+            Err(ProfileError::Rule(404, _))
+        ));
         assert!(matches!(
             lifecycle(&profiles, INIT, 1_000_000, 500, Action::Delete),
             Err(ProfileError::Rule(404, _))

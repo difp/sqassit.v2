@@ -263,6 +263,94 @@ async fn coach_purge(
     })
     .await
 }
+async fn coach_pending(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        let list = crate::coach::list_active(&p, &i, n)?;
+        let total = list["trainings"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v["pending_count"].as_i64())
+                    .sum::<i64>()
+            })
+            .unwrap_or(0);
+        Ok(json!({"ok":true,"pending_count":total}))
+    })
+    .await
+}
+async fn coach_participants(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_participants::list(&p, &i, n, id)
+    })
+    .await
+}
+async fn coach_add_participant(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coach_participants::ParticipantIn>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_participants::change(
+            &p,
+            &i,
+            n,
+            id,
+            body.user_id,
+            crate::coach_participants::Action::Add,
+        )
+    })
+    .await
+}
+async fn coach_participant_action(
+    state: WebState,
+    headers: HeaderMap,
+    id: i64,
+    user: i64,
+    action: crate::coach_participants::Action,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_participants::change(&p, &i, n, id, user, action)
+    })
+    .await
+}
+macro_rules! participant_route {
+    ($name:ident,$action:ident) => {
+        async fn $name(
+            State(state): State<WebState>,
+            headers: HeaderMap,
+            Path((id, user)): Path<(i64, i64)>,
+        ) -> Response {
+            coach_participant_action(
+                state,
+                headers,
+                id,
+                user,
+                crate::coach_participants::Action::$action,
+            )
+            .await
+        }
+    };
+}
+participant_route!(coach_approve, Approve);
+participant_route!(coach_reject, Reject);
+participant_route!(coach_remove, Cancel);
+participant_route!(coach_reinstate, Restore);
+async fn coach_reminder(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coach_participants::ReminderIn>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_participants::reminder(&p, &i, n, id, body)
+    })
+    .await
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -300,6 +388,31 @@ pub fn router(
         .route("/api/me", get(api_me))
         .route("/api/trainings", get(api_trainings))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route("/api/coach/pending", get(coach_pending))
+        .route(
+            "/api/coach/trainings/{id}/participants",
+            get(coach_participants).post(coach_add_participant),
+        )
+        .route(
+            "/api/coach/trainings/{id}/participants/{user}/approve",
+            post(coach_approve),
+        )
+        .route(
+            "/api/coach/trainings/{id}/participants/{user}/reject",
+            post(coach_reject),
+        )
+        .route(
+            "/api/coach/trainings/{id}/participants/{user}/cancel",
+            post(coach_remove),
+        )
+        .route(
+            "/api/coach/trainings/{id}/participants/{user}/restore",
+            post(coach_reinstate),
+        )
+        .route(
+            "/api/coach/trainings/{id}/reminder",
+            axum::routing::patch(coach_reminder),
+        )
         .route(
             "/api/coach/trainings/{id}",
             axum::routing::delete(coach_delete).patch(coach_edit),
@@ -412,6 +525,7 @@ mod tests {
         };
         let mut coach_profiles = profiles.clone();
         coach_profiles.owner = 42;
+        let coach_db = coach_profiles.db.clone();
         let coach_app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
             false,
@@ -602,6 +716,64 @@ mod tests {
             .iter()
             .any(|v| v["id"] == created_id));
         let endpoint = format!("/api/coach/trainings/{created_id}");
+        let participants = format!("{endpoint}/participants");
+        let (status, added) = send(
+            coach_app.clone(),
+            "POST",
+            &participants,
+            &signed,
+            r#"{"user_id":314}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(added["status"], "booked");
+        let (_, listed) = send(coach_app.clone(), "GET", &participants, &signed, "").await;
+        assert_eq!(listed["participants"][0]["anonymous"], true);
+        assert_ne!(listed["participants"][0]["first_name"], "Секретное имя");
+        let remove = format!("{participants}/314/cancel");
+        assert_eq!(
+            send(coach_app.clone(), "POST", &remove, &signed, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                &format!("{participants}/314/restore"),
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        coach_db.lock().unwrap().execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES (?1,42,'pending',0)",[created_id]).unwrap();
+        let (_, pending) = send(coach_app.clone(), "GET", "/api/coach/pending", &signed, "").await;
+        assert_eq!(pending["pending_count"], 1);
+        let (status, approved) = send(
+            coach_app.clone(),
+            "POST",
+            &format!("{participants}/42/approve"),
+            &signed,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(approved["status"], "booked");
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "PATCH",
+                &format!("{endpoint}/reminder"),
+                &signed,
+                r#"{"enabled":true,"offset_min":60}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
         let edit_body =
             json!({"date":date,"time":"13:00","training_type":"Новое время"}).to_string();
         assert_eq!(

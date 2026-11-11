@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod booking;
 pub mod coach;
+pub mod coach_participants;
 pub mod identity;
 pub mod profile;
 pub mod rate_limit;
