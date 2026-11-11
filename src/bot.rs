@@ -553,6 +553,36 @@ mod tests {
         assert_eq!(calls.last().unwrap().0, "answerCallbackQuery");
     }
     #[tokio::test]
+    async fn slot_booking_answers_and_refreshes_before_notifications() {
+        let profiles = profiles();
+        let bot = Fake::default();
+        let notifier = crate::event_notify::EventNotifier::default();
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute_batch("INSERT INTO users(telegram_id,first_name,notify_trainings,created_at) VALUES(1,'First',1,0); INSERT INTO trainings(id,title,training_type,start_at,capacity,created_at) VALUES(7,'x','Test',25000,2,0);").unwrap();
+        }
+        let callback = json!({"callback_query":{"id":"cb","from":{"id":1},"data":"slots:book:7","message":{"message_id":55,"chat":{"id":1}}}});
+        handle_update(
+            &profiles,
+            &bot,
+            "https://example.test",
+            &notifier,
+            &callback,
+            1000,
+        )
+        .await
+        .unwrap();
+        let calls = bot.calls.lock().unwrap();
+        let position = |method: &str| {
+            calls
+                .iter()
+                .position(|(name, _)| name == method)
+                .unwrap_or_else(|| panic!("missing {method}"))
+        };
+        assert!(position("answerCallbackQuery") < position("editMessageText"));
+        assert!(position("editMessageText") < position("sendMessage"));
+    }
+    #[tokio::test]
     async fn slot_callbacks_book_cancel_and_hide_private_details() {
         let profiles = profiles();
         let bot = Fake::default();

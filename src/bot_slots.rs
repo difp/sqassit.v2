@@ -507,6 +507,18 @@ pub async fn handle_callback<T: BotTransport>(
                 answer(bot, cb, message, true).await?;
             }
             Ok(change) => {
+                // Answer and refresh the slot before best-effort fan-out so a
+                // slow Telegram notification cannot delay the callback reply.
+                answer(bot, cb, change.message, false).await?;
+                if let (Some(chat), Some(message_id), Some((text, markup))) = (
+                    chat,
+                    callback
+                        .pointer("/message/message_id")
+                        .and_then(Value::as_i64),
+                    details(profiles, id, user, now)?,
+                ) {
+                    bot.request("editMessageText",json!({"chat_id":chat,"message_id":message_id,"text":text,"parse_mode":"HTML","reply_markup":markup})).await?;
+                }
                 let event = crate::training_notify::TrainingChange {
                     training: id,
                     user,
@@ -536,16 +548,6 @@ pub async fn handle_callback<T: BotTransport>(
                     {
                         eprintln!("Training promotion notification delivery failed");
                     }
-                }
-                answer(bot, cb, change.message, false).await?;
-                if let (Some(chat), Some(message_id), Some((text, markup))) = (
-                    chat,
-                    callback
-                        .pointer("/message/message_id")
-                        .and_then(Value::as_i64),
-                    details(profiles, id, user, now)?,
-                ) {
-                    bot.request("editMessageText",json!({"chat_id":chat,"message_id":message_id,"text":text,"parse_mode":"HTML","reply_markup":markup})).await?;
                 }
             }
         }
