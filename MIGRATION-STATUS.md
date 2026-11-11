@@ -68,6 +68,6 @@ This is **not yet a verified replacement**. All 75 reference HTTP routes are wir
 - Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and mixed-kind cleanup ordering is not compared; the training edit comparison normalizes Python's repeated no-op edits and edit-time manager alerts.
 - Real Telegram polling, webhook registration, notifications, reminders and restart/concurrency behavior remain unverified; delivery is best-effort and can duplicate after a side effect fails.
 - Browser Mini App scenarios, ICS, Unicode, avatar download/ETag and CSP behavior need end-to-end checks against Telegram; only a synthetic local 50,000-player directory benchmark exists, with no production load or database-size measurement.
-- Backup/restore, deployment on the target platform and rollback have not been rehearsed; the Xray/VLESS scripts remain Python-only.
+- A local smoke test rehearses an online SQLite backup and a restart from the copy with a signed-in profile marker; deployment on the target platform and rollback have not been rehearsed, and the Xray/VLESS scripts remain Python-only.
 
 Do not deploy this crate in place of the Python application.
