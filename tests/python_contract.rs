@@ -104,6 +104,10 @@ async fn same_profile_and_training_workflow_as_python() {
         sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "profile", 0, 42, now, 86400);
     let ics_token =
         sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "ics", 1, 42, now, 86400);
+    let avatar_token =
+        sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "avatar", 42, 42, now, 86400);
+    let avatar_unknown =
+        sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "avatar_real", 999, 999, now, 86400);
     let output = std::process::Command::new(python)
         .arg("tests/contract_oracle.py")
         .arg(now.to_string())
@@ -170,6 +174,11 @@ async fn same_profile_and_training_workflow_as_python() {
             ),
         ),
         ("GET", "/api/me", 42, None),
+        // Avatar authorization and privacy without downloading from Telegram.
+        ("GET", "/api/avatar/42?token=<avatar-token>", 0, None),
+        ("GET", "/api/avatar/42/stale?token=<avatar-token>", 0, None),
+        ("GET", "/api/avatar/42?token=bad", 0, None),
+        ("GET", "/api/avatar/999?token=<avatar-unknown>", 0, None),
         ("GET", "/api/levels", 42, None),
         ("GET", "/api/coach/players", 42, None),
         ("POST", "/api/trainings/999/book", 42, None),
@@ -510,7 +519,9 @@ async fn same_profile_and_training_workflow_as_python() {
     {
         let path = raw_path
             .replace("<profile-token>", &profile_token)
-            .replace("<ics-token>", &ics_token);
+            .replace("<ics-token>", &ics_token)
+            .replace("<avatar-token>", &avatar_token)
+            .replace("<avatar-unknown>", &avatar_unknown);
         let mut request = Request::builder().method(method).uri(&path);
         if id != 0 {
             request = request.header(

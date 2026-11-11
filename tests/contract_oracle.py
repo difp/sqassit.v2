@@ -36,6 +36,8 @@ async def run():
     now, date, weekday = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
     profile_token = issue_scoped_token(os.environ["BOT_TOKEN"], "profile", 0, 42)
     ics_token = issue_scoped_token(os.environ["BOT_TOKEN"], "ics", 1, 42)
+    avatar_token = issue_scoped_token(os.environ["BOT_TOKEN"], "avatar", 42, 42)
+    avatar_unknown = issue_scoped_token(os.environ["BOT_TOKEN"], "avatar_real", 999, 999)
     main._spawn = discard
     with tempfile.TemporaryDirectory(prefix="sqassit-contract-") as directory:
         await db.connect(os.path.join(directory, "reference.sqlite"))
@@ -73,6 +75,11 @@ async def run():
                 ("PUT", "/api/me/profile", "player", {"about":"Люблю сквош","display_mode":"animal","show_username":False,"phone":"+1"}),
                 ("PUT", "/api/me/profile", "player", {"about":"Люблю сквош","display_mode":"animal","show_username":False,"phone":" +7 (999) 123-45-67 "}),
                 ("GET", "/api/me", "player", None),
+                # Avatar authorization and privacy without downloading from Telegram.
+                ("GET", "/api/avatar/42?token=<avatar-token>", "none", None),
+                ("GET", "/api/avatar/42/stale?token=<avatar-token>", "none", None),
+                ("GET", "/api/avatar/42?token=bad", "none", None),
+                ("GET", "/api/avatar/999?token=<avatar-unknown>", "none", None),
                 ("GET", "/api/levels", "player", None),
                 ("GET", "/api/coach/players", "player", None),
                 ("POST", "/api/trainings/999/book", "player", None),
@@ -216,7 +223,11 @@ async def run():
             async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=main.app), base_url="http://reference") as client:
                 result = []
                 for method, raw_path, actor, body in scenarios:
-                    path = raw_path.replace("<profile-token>", profile_token).replace("<ics-token>", ics_token)
+                    path = (raw_path
+                        .replace("<profile-token>", profile_token)
+                        .replace("<ics-token>", ics_token)
+                        .replace("<avatar-token>", avatar_token)
+                        .replace("<avatar-unknown>", avatar_unknown))
                     response = await client.request(method, path, headers=headers[actor], **({"json":body} if body is not None else {}))
                     try:
                         payload = response.json()

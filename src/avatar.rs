@@ -278,7 +278,9 @@ impl AvatarCache {
                 return Err(AvatarError::NotFound);
             }
             if file.is_none() {
-                let fetched = source.profile_photo(id).await?;
+                // Avatar lookup is best-effort: the reference logs Telegram failures
+                // and falls through to the negative cache instead of returning 502.
+                let fetched = source.profile_photo(id).await.unwrap_or(None);
                 if let Some(fetched) = fetched {
                     let db = p.db.lock().map_err(|_| AvatarError::Database)?;
                     db.execute("UPDATE users SET avatar_file_id=?1 WHERE telegram_id=?2 AND (avatar_file_id IS NULL OR avatar_file_id='')",rusqlite::params![fetched,id]).map_err(|_|AvatarError::Database)?;
@@ -519,6 +521,33 @@ mod tests {
         cache.remove_user(42).await;
         assert!(!root.join("42").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[tokio::test]
+    async fn profile_photo_failure_falls_back_to_the_negative_cache() {
+        struct Failing;
+        impl AvatarSource for Failing {
+            async fn profile_photo(&self, _: i64) -> Result<Option<String>, AvatarError> {
+                Err(AvatarError::Unavailable)
+            }
+            async fn download(&self, _: &str) -> Result<Option<Vec<u8>>, AvatarError> {
+                unreachable!("no file id was stored")
+            }
+        }
+        let p = service();
+        p.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET avatar_file_id=NULL WHERE telegram_id=42",
+                [],
+            )
+            .unwrap();
+        let token = auth::issue_scoped_token("secret", "avatar_real", 42, 42, 1000, 86400);
+        assert!(matches!(
+            AvatarCache::default()
+                .get(&p, &Failing, 42, &token, None, 1000)
+                .await,
+            Err(AvatarError::NotFound)
+        ));
     }
     #[test]
     fn disk_cleanup_trims_oldest_files_to_the_target() {
