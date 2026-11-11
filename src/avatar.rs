@@ -73,6 +73,20 @@ pub fn media_type(content: &[u8]) -> &'static str {
     }
 }
 impl AvatarCache {
+    /// Remove all cached bytes and negative entries belonging to a deleted account.
+    pub async fn remove_user(&self, id: i64) {
+        let mut cache = self.inner.lock().await;
+        let removed: usize = cache
+            .entries
+            .iter()
+            .filter(|((user, _), _)| *user == id)
+            .map(|(_, value)| value.len())
+            .sum();
+        cache.entries.retain(|(user, _), _| *user != id);
+        cache.order.retain(|(user, _)| *user != id);
+        cache.missing.retain(|(user, _), _| *user != id);
+        cache.bytes = cache.bytes.saturating_sub(removed);
+    }
     pub async fn get<S: AvatarSource>(
         &self,
         p: &Profiles,
@@ -239,6 +253,12 @@ mod tests {
             .unwrap();
         assert!(!stale.immutable);
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        cache.remove_user(42).await;
+        assert!(cache
+            .get(&p, &source, 42, &token, Some(&version), 1000)
+            .await
+            .is_ok());
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
         p.db.lock()
             .unwrap()
             .execute(

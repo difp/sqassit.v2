@@ -296,6 +296,60 @@ async fn api_me(State(state): State<WebState>, headers: HeaderMap) -> Response {
 async fn account_export(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| crate::account::export(&p, &i, n)).await
 }
+#[derive(serde::Deserialize)]
+struct DeleteAccountQuery {
+    #[serde(default)]
+    confirm: bool,
+}
+async fn account_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<DeleteAccountQuery>,
+) -> Response {
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let worker = profiles.clone();
+    let init = init_data(&headers);
+    match tokio::task::spawn_blocking(move || {
+        crate::account::delete(&worker, &init, now(), query.confirm)
+    })
+    .await
+    {
+        Ok(Ok(deleted)) => {
+            if let Some((cache, _)) = state.avatar {
+                cache.remove_user(deleted.user).await;
+            }
+            if let Some(bot) = state.bot {
+                tokio::spawn(async move {
+                    for (id, user) in deleted.promoted_matches {
+                        let event = crate::match_notify::MatchChange {
+                            base: &bot.base_url,
+                            id,
+                            user,
+                            status: "promoted",
+                            change: crate::match_notify::Change::Event,
+                            now: now(),
+                        };
+                        if crate::match_notify::notify(&profiles, &bot.client, &bot.notifier, event)
+                            .await
+                            .is_err()
+                        {
+                            eprintln!("Match promotion notification delivery failed");
+                        }
+                    }
+                });
+            }
+            Json(json!({"ok":true,"deleted":true})).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
+}
 async fn api_public_profile(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1336,7 +1390,7 @@ pub fn router(
         .route("/coach", get(coach))
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
-        .route("/api/me", get(api_me))
+        .route("/api/me", get(api_me).delete(account_delete))
         .route("/api/me/export", get(account_export))
         .route("/api/feedback", post(feedback_submit))
         .route("/api/messages/coach", post(player_message))
@@ -1885,6 +1939,27 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+        assert_eq!(
+            coauthor_action(app.clone(), "DELETE", "/api/me?confirm=true", 1, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "DELETE", "/api/me", 3, "")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "DELETE", "/api/me?confirm=true", 3, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, fresh) = coauthor_action(app.clone(), "GET", "/api/me/export", 3, "").await;
+        assert!(fresh["bookings"].as_array().unwrap().is_empty());
+        assert!(fresh["messages"].as_array().unwrap().is_empty());
     }
     #[test]
     fn original_templates_render_with_expected_dev_flag() {
