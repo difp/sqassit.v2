@@ -19,6 +19,19 @@ pub fn animal_identity(telegram_id: i64) -> (&'static str, &'static str) {
     ANIMALS[telegram_id.rem_euclid(ANIMALS.len() as i64) as usize]
 }
 
+pub(crate) const ANIMAL_COUNT: i64 = ANIMALS.len() as i64;
+
+/// Indexes of animals whose name matches the normalized query, for SQL search.
+pub(crate) fn animal_indexes(query: &str) -> Vec<usize> {
+    let needle = crate::storage::search_norm(query);
+    ANIMALS
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, name))| crate::storage::search_norm(name).contains(&needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
