@@ -33,6 +33,7 @@ pub fn export(p: &Profiles, init: &str, now: i64) -> Result<Value, ProfileError>
 pub struct DeletedAccount {
     pub user: i64,
     pub promoted_matches: Vec<(i64, i64)>,
+    pub promoted_trainings: Vec<(i64, i64)>,
 }
 /// Atomically erase account records and fill newly available places.
 pub fn delete(
@@ -118,6 +119,7 @@ pub fn delete(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| ProfileError::Storage)?
     };
+    let mut promoted_trainings = Vec::new();
     for (training, capacity) in bookings {
         tx.execute(
             "UPDATE bookings SET status='cancelled',position=0 WHERE training_id=?1 AND user_id=?2",
@@ -135,6 +137,7 @@ pub fn delete(
             let next:Option<i64>=tx.query_row("SELECT user_id FROM bookings WHERE training_id=?1 AND status='waitlist' ORDER BY position ASC LIMIT 1",[training],|r|r.get(0)).optional().map_err(|_|ProfileError::Storage)?;
             if let Some(next) = next {
                 tx.execute("UPDATE bookings SET status='booked',position=0 WHERE training_id=?1 AND user_id=?2",params![training,next]).map_err(|_|ProfileError::Storage)?;
+                promoted_trainings.push((training, next));
             }
         }
     }
@@ -162,6 +165,7 @@ pub fn delete(
     Ok(DeletedAccount {
         user: id,
         promoted_matches,
+        promoted_trainings,
     })
 }
 
@@ -258,6 +262,7 @@ mod tests {
         let result = delete(&p, INIT, 1_000_000, true).unwrap();
         assert_eq!(result.user, 42);
         assert_eq!(result.promoted_matches, vec![(1, 55)]);
+        assert_eq!(result.promoted_trainings, vec![(1, 55)]);
         let db = p.db.lock().unwrap();
         assert_eq!(
             db.query_row(

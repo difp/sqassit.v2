@@ -111,7 +111,7 @@ pub async fn cleanup_expired<S: ReminderDeleter>(
 ) -> Result<(), ReminderError> {
     let records = {
         let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        let mut stmt=db.prepare("SELECT id,chat_id,message_id FROM event_notifications WHERE kind IN ('training_reminder','chat','match','match_feed','coach_application','notice') AND delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at").map_err(|_|ReminderError::Database)?;
+        let mut stmt=db.prepare("SELECT id,chat_id,message_id FROM event_notifications WHERE kind IN ('training','training_reminder','chat','match','match_feed','coach_application','notice') AND delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at").map_err(|_|ReminderError::Database)?;
         let rows = stmt
             .query_map([now], |r| {
                 Ok((

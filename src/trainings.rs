@@ -151,7 +151,7 @@ fn authorize_booking(
         .map_err(ProfileError::RateLimited)?;
     Ok((id, user))
 }
-/// Preliminary preview: delivery of Telegram notifications is not implemented yet.
+/// Booking mutation; the HTTP layer schedules preview notifications after it succeeds.
 pub fn book(
     profiles: &Profiles,
     init: &str,
@@ -207,7 +207,7 @@ pub fn book(
     };
     Ok(json!({"ok":true,"status":status,"message":message}))
 }
-/// Cancellation and FIFO promotion; Telegram notification delivery remains to be migrated.
+/// Cancellation and FIFO promotion; the HTTP layer schedules preview notifications.
 pub fn cancel(
     profiles: &Profiles,
     init: &str,

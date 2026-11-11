@@ -31,6 +31,7 @@ pub mod role_notify;
 pub mod room;
 pub mod storage;
 pub mod telegram;
+pub mod training_notify;
 pub mod trainings;
 pub mod updates;
 pub mod web;
