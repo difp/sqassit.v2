@@ -14,4 +14,5 @@ pub mod reminders;
 pub mod storage;
 pub mod telegram;
 pub mod trainings;
+pub mod updates;
 pub mod web;

@@ -90,6 +90,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_str(),
         "1" | "true" | "yes" | "on"
     );
+    let enable_bot = matches!(
+        env::var("SQASSIT_ENABLE_BOT")
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    let bot = if enable_bot {
+        use sqassit::telegram::BotTransport;
+        let service = profiles
+            .clone()
+            .ok_or("BOT_TOKEN and COACH_TELEGRAM_ID are required for bot updates")?;
+        let mode = match env::var("BOT_MODE")
+            .unwrap_or_else(|_| "polling".into())
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
+            "polling" => sqassit::updates::BotMode::Polling,
+            "webhook" => sqassit::updates::BotMode::Webhook,
+            _ => return Err("BOT_MODE must be polling or webhook".into()),
+        };
+        let base = env::var("WEBHOOK_BASE_URL")
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_owned();
+        let secret = env::var("WEBHOOK_SECRET")
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if mode == sqassit::updates::BotMode::Webhook
+            && !sqassit::updates::validate_webhook(&base, &secret)
+        {
+            return Err(
+                "Webhook mode requires WEBHOOK_BASE_URL and a strong WEBHOOK_SECRET".into(),
+            );
+        }
+        let proxy = env::var("BOT_PROXY").unwrap_or_default();
+        let client =
+            sqassit::telegram::TelegramClient::new(service.bot_token.clone(), Some(&proxy))
+                .map_err(|_| "Invalid Telegram client or BOT_PROXY")?;
+        let register = matches!(
+            env::var("SQASSIT_REGISTER_WEBHOOK")
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+        if mode == sqassit::updates::BotMode::Webhook && register {
+            client.request("setWebhook",serde_json::json!({"url":format!("{base}/telegram/webhook"),"secret_token":secret,"drop_pending_updates":false})).await.map_err(|_|"Telegram webhook registration failed")?;
+        }
+        Some(sqassit::updates::BotRuntime {
+            profiles: service,
+            client,
+            mode,
+            secret,
+            base_url: base,
+        })
+    } else {
+        None
+    };
     let reminder_task = if enable_reminders {
         let service = profiles
             .clone()
@@ -123,14 +187,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let poll_task = bot
+        .as_ref()
+        .filter(|v| v.mode == sqassit::updates::BotMode::Polling)
+        .map(|v| tokio::spawn(sqassit::updates::poll(v.clone())));
     let server_result = axum::serve(
         listener,
-        sqassit::web::router(static_path, allow_dev, profiles),
+        sqassit::web::router(static_path, allow_dev, profiles, bot),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await;
+    if let Some(task) = poll_task {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(task) = reminder_task {
         task.abort();
         let _ = task.await;

@@ -19,6 +19,7 @@ const TABS_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; s
 pub struct WebState {
     pub allow_dev_init_data: bool,
     pub profiles: Option<crate::profile::Profiles>,
+    pub bot: Option<crate::updates::BotRuntime>,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -351,6 +352,37 @@ async fn coach_reminder(
     })
     .await
 }
+async fn telegram_webhook(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(update): Json<serde_json::Value>,
+) -> Response {
+    let Some(bot) = state.bot else {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail":"Not Found"}))).into_response();
+    };
+    let received = headers
+        .get("x-telegram-bot-api-secret-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (status, value) = crate::updates::webhook(
+        &bot.profiles,
+        &bot.client,
+        crate::updates::WebhookConfig {
+            mode: bot.mode,
+            secret: &bot.secret,
+            base_url: &bot.base_url,
+        },
+        received,
+        &update,
+        now(),
+    )
+    .await;
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(value),
+    )
+        .into_response()
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -379,6 +411,7 @@ pub fn router(
     static_path: PathBuf,
     allow_dev_init_data: bool,
     profiles: Option<crate::profile::Profiles>,
+    bot: Option<crate::updates::BotRuntime>,
 ) -> Router {
     Router::new()
         .route("/", get(player))
@@ -427,6 +460,7 @@ pub fn router(
         .route("/api/me/onboarding", post(api_onboarding))
         .route("/api/me/profile", put(api_update_profile))
         .route("/api/me/notifications", put(api_notifications))
+        .route("/telegram/webhook", post(telegram_webhook))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .nest_service("/static", ServeDir::new(static_path))
@@ -434,6 +468,7 @@ pub fn router(
         .with_state(WebState {
             allow_dev_init_data,
             profiles,
+            bot,
         })
 }
 
@@ -455,7 +490,7 @@ mod tests {
         use axum::body::{to_bytes, Body};
         use tower::ServiceExt;
         let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static");
-        let app = router(static_dir, false, None);
+        let app = router(static_dir, false, None, None);
         for (url, status) in [
             ("/", StatusCode::OK),
             ("/coach", StatusCode::OK),
@@ -530,11 +565,13 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
             false,
             Some(coach_profiles),
+            None,
         );
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
             false,
             Some(profiles),
+            None,
         );
         let timestamp = now().to_string();
         let user = r#"{"id":42,"first_name":"Иван"}"#;
@@ -806,5 +843,53 @@ mod tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
+    }
+    #[tokio::test]
+    async fn webhook_route_checks_secret_before_dispatch() {
+        use axum::body::{to_bytes, Body};
+        use tower::ServiceExt;
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        let profiles = crate::profile::Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "test-token".into(),
+            owner: 1,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
+        };
+        let secret = "01234567890123456789012345678901";
+        let bot = crate::updates::BotRuntime {
+            profiles: profiles.clone(),
+            client: crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
+            mode: crate::updates::BotMode::Webhook,
+            secret: secret.into(),
+            base_url: "https://example.test".into(),
+        };
+        let app = router(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
+            false,
+            Some(profiles),
+            Some(bot),
+        );
+        let payload = r#"{"callback_query":{"id":"x","from":{"id":1},"data":"unknown:action"}}"#;
+        let request = |token: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/telegram/webhook")
+                .header("content-type", "application/json")
+                .header("x-telegram-bot-api-secret-token", token)
+                .body(Body::from(payload))
+                .unwrap()
+        };
+        let denied = app.clone().oneshot(request("bad")).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(denied.into_body(), 4096).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("Forbidden"));
+        let retry = app.oneshot(request(secret)).await.unwrap();
+        assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
