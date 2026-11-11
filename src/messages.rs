@@ -283,6 +283,12 @@ mod tests {
             },
         )
         .unwrap();
+        {
+            let db = svc.profiles.db.lock().unwrap();
+            for (author, recipient) in [(777, 42), (888, 42), (42, 777)] {
+                db.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('chat',?1,?2,?2,1,'',0,9999999)",params![author,recipient]).unwrap();
+            }
+        }
         let p = svc.thread(&player, 1_000_003, None).unwrap();
         assert_eq!(p["messages"].as_array().unwrap().len(), 3);
         assert_eq!(p["messages"][2]["from_me"], false);
@@ -292,6 +298,16 @@ mod tests {
         let c2 = svc.thread(&coach2, 1_000_003, Some(42)).unwrap();
         assert_eq!(c2["messages"].as_array().unwrap().len(), 2);
         assert_eq!(c2["messages"][1]["from_me"], true);
+        {
+            let db = svc.profiles.db.lock().unwrap();
+            let deadline = |author, recipient| {
+                db.query_row("SELECT delete_at FROM event_notifications WHERE kind='chat' AND entity_id=?1 AND chat_id=?2",params![author,recipient],|r|r.get::<_,i64>(0)).unwrap()
+            };
+            assert_eq!(deadline(777, 42), 1_000_003);
+            assert_eq!(deadline(42, 777), 1_000_003);
+            assert_eq!(deadline(888, 42), 9_999_999);
+        }
+
         assert_eq!(
             svc.thread(&outsider, 1_000_003, Some(42)).unwrap()["messages"]
                 .as_array()

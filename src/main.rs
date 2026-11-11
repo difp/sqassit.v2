@@ -60,7 +60,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;
             }
-            let db = sqassit::storage::open(path)?;
+            let mut db = sqassit::storage::open(path)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            {
+                let tx = db.transaction()?;
+                tx.execute("INSERT OR IGNORE INTO coaches(telegram_id,added_by,created_at) VALUES(?1,NULL,?2)",rusqlite::params![owner,now])?;
+                tx.execute("INSERT INTO users(telegram_id,username,first_name,is_coach,created_at) VALUES(?1,NULL,'Тренер',1,?2) ON CONFLICT(telegram_id) DO UPDATE SET username=NULL,first_name='Тренер',is_coach=1",rusqlite::params![owner,now])?;
+                tx.commit()?;
+            }
             Some(sqassit::profile::Profiles {
                 db: std::sync::Arc::new(std::sync::Mutex::new(db)),
                 bot_token: token.trim().to_owned(),
@@ -187,6 +196,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let cleanup_task = if !enable_reminders {
+        bot.as_ref().map(|bot| {
+            let bot = bot.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    if sqassit::reminders::cleanup_expired(&bot.profiles, &bot.client, now)
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("Notification cleanup failed; it will be retried");
+                    }
+                }
+            })
+        })
+    } else {
+        None
+    };
     let poll_task = bot
         .as_ref()
         .filter(|v| v.mode == sqassit::updates::BotMode::Polling)
@@ -200,6 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await;
     if let Some(task) = poll_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = cleanup_task {
         task.abort();
         let _ = task.await;
     }

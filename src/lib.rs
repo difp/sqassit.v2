@@ -7,6 +7,7 @@ pub mod booking;
 pub mod bot;
 pub mod bot_slots;
 pub mod calendar;
+pub mod chat_notify;
 pub mod coach;
 pub mod coach_participants;
 pub mod identity;

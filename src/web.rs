@@ -175,15 +175,52 @@ where
         Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
     }
 }
+async fn message_send<F>(state: WebState, headers: HeaderMap, operation: F) -> Response
+where
+    F: FnOnce(
+            crate::messages::Messages,
+            String,
+            i64,
+        ) -> Result<crate::messages::Sent, crate::profile::ProfileError>
+        + Send
+        + 'static,
+{
+    let Some(service) = state.messages else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Message service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    let profiles = service.profiles.clone();
+    let bot = state.bot;
+    match tokio::task::spawn_blocking(move || operation(service, init, now())).await {
+        Ok(Ok(sent)) => {
+            if let Some(bot) = bot {
+                tokio::spawn(async move {
+                    let _ = crate::chat_notify::notify(
+                        &profiles,
+                        &bot.client,
+                        &sent,
+                        &bot.base_url,
+                        now(),
+                    )
+                    .await;
+                });
+            }
+            Json(json!({"ok":true})).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
+}
 async fn player_message(
     State(state): State<WebState>,
     headers: HeaderMap,
     Json(body): Json<crate::messages::MessageIn>,
 ) -> Response {
-    message_work(state, headers, move |s, i, n| {
-        s.send_to_coach(&i, n, body).map(|_| json!({"ok":true}))
-    })
-    .await
+    message_send(state, headers, move |s, i, n| s.send_to_coach(&i, n, body)).await
 }
 async fn player_thread(State(state): State<WebState>, headers: HeaderMap) -> Response {
     message_work(state, headers, |s, i, n| s.thread(&i, n, None)).await
@@ -204,8 +241,8 @@ async fn coach_message(
     Path(user): Path<i64>,
     Json(body): Json<crate::messages::MessageIn>,
 ) -> Response {
-    message_work(state, headers, move |s, i, n| {
-        s.coach_reply(&i, n, user, body).map(|_| json!({"ok":true}))
+    message_send(state, headers, move |s, i, n| {
+        s.coach_reply(&i, n, user, body)
     })
     .await
 }

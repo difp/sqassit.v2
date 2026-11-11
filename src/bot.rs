@@ -26,13 +26,16 @@ pub(crate) fn escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
 }
-fn keyboard(base: &str) -> Value {
+pub(crate) fn web_app_url(base: &str) -> String {
     let base = base.trim_end_matches('/');
-    let url = if base.is_empty() {
+    if base.is_empty() {
         "https://t.me".to_owned()
     } else {
         format!("{base}{}v=46", if base.contains('?') { "&" } else { "?" })
-    };
+    }
+}
+fn keyboard(base: &str) -> Value {
+    let url = web_app_url(base);
     json!({"inline_keyboard":[[{"text":"🏸 Открыть тренировки","web_app":{"url":url}}],[{"text":"🗓 Выбрать слот","callback_data":"slots:list"},{"text":"👥 Кто записался","callback_data":"attendees:list"}]]})
 }
 fn phone_keyboard() -> Value {
