@@ -835,6 +835,17 @@ async fn registry_manager(
     })
     .await
 }
+async fn coach_transfer(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coach_registry::CoachInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_registry::transfer(&p, &i, n, id, body)
+    })
+    .await
+}
 #[derive(serde::Deserialize)]
 struct ArchiveQuery {
     #[serde(default = "archive_limit")]
@@ -1161,6 +1172,7 @@ pub fn router(
             "/api/coach/coaches/{id}/manager",
             axum::routing::patch(registry_manager),
         )
+        .route("/api/coach/trainings/{id}/transfer", post(coach_transfer))
         .route("/api/coach/trainings/batch", post(coach_create_batch))
         .route("/api/coach/history", get(coach_history))
         .route("/api/coach/deleted", get(coach_deleted))
@@ -1760,6 +1772,54 @@ mod tests {
         )
         .await;
         assert_eq!(removed["removed"], true);
+        let transfer = "/api/coach/trainings/901/transfer";
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                transfer,
+                &signed,
+                r#"{"telegram_id":555}"#
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                transfer,
+                &signed,
+                r#"{"telegram_id":314}"#
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                transfer,
+                &signed,
+                r#"{"username":"@othercoach"}"#
+            )
+            .await
+            .1["telegram_id"],
+            555
+        );
+        assert_eq!(
+            coach_db
+                .lock()
+                .unwrap()
+                .query_row("SELECT created_by FROM trainings WHERE id=901", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            555
+        );
         let roster = "/api/coach/coaches";
         assert_eq!(
             send(app.clone(), "GET", roster, &signed, "").await.0,

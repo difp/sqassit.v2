@@ -178,6 +178,58 @@ pub fn set_manager(
     Ok(json!({"ok":true}))
 }
 
+/// Transfer retains the training and its existing bookings. Telegram alert is pending migration.
+pub fn transfer(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    training: i64,
+    value: CoachInput,
+) -> Result<Value, ProfileError> {
+    let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let actor = coach::coach(profiles, &db, init, now)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ProfileError::Storage)?;
+    let creator = tx
+        .query_row(
+            "SELECT created_by FROM trainings WHERE id=?1 AND (deleted_at IS NULL OR deleted_at=0)",
+            [training],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?
+        .ok_or(ProfileError::Rule(404, "Тренировка не найдена"))?;
+    if creator != Some(actor) && actor != profiles.owner {
+        return Err(ProfileError::Rule(404, "Тренировка не найдена"));
+    }
+    let target =
+        resolve(&tx, value)?.ok_or(ProfileError::Rule(422, "Укажите тренера (telegram_id)."))?;
+    let coach: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM coaches WHERE telegram_id=?1)",
+            [target],
+            |r| r.get(0),
+        )
+        .map_err(|_| ProfileError::Storage)?;
+    if !coach {
+        return Err(ProfileError::Rule(400, "Получатель должен быть тренером."));
+    }
+    if creator == Some(target) {
+        return Err(ProfileError::Rule(
+            400,
+            "Занятие уже принадлежит этому тренеру.",
+        ));
+    }
+    tx.execute(
+        "UPDATE trainings SET created_by=?1 WHERE id=?2",
+        params![target, training],
+    )
+    .map_err(|_| ProfileError::Storage)?;
+    tx.commit().map_err(|_| ProfileError::Storage)?;
+    Ok(json!({"ok":true,"telegram_id":target}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +287,26 @@ mod tests {
             .unwrap()
             .execute("UPDATE coaches SET is_manager=1 WHERE telegram_id=42", [])
             .unwrap();
+        p.db.lock().unwrap().execute_batch("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(1,'Training',2000000,0,77); INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(1,77,'booked',0);").unwrap();
+        let target = || serde_json::from_value(json!({"telegram_id":42})).unwrap();
+        assert!(matches!(
+            transfer(&p, INIT, 1_000_000, 1, target()),
+            Err(ProfileError::Rule(404, _))
+        ));
+        p.owner = 42;
+        transfer(&p, INIT, 1_000_000, 1, target()).unwrap();
+        assert_eq!(
+            p.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM bookings WHERE training_id=1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        p.owner = 999;
         assert!(matches!(
             set_manager(&p, INIT, 1_000_000, 77, ManagerInput { enabled: false }),
             Err(ProfileError::Forbidden(_))
