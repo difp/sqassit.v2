@@ -81,8 +81,11 @@ async def run():
             )
             match = await db.get_match(1)
             await main._notify_match_event(match, 7, "pending")
+            await db.delete_match(1)
+            match = await db.get_match(1)
+            await main._notify_match_deleted(match)
             notifications = await db._fetchall(
-                "SELECT kind,entity_id,chat_id,user_id,message_id,text,delete_at "
+                "SELECT kind,entity_id,chat_id,user_id,message_id,text "
                 "FROM event_notifications ORDER BY chat_id,user_id"
             )
             print(json.dumps({

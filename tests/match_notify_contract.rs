@@ -41,7 +41,7 @@ impl BotTransport for Fake {
 fn rows(db: &rusqlite::Connection) -> Vec<Value> {
     let mut stmt = db
         .prepare(
-            "SELECT kind,entity_id,chat_id,user_id,message_id,text,delete_at \
+            "SELECT kind,entity_id,chat_id,user_id,message_id,text \
              FROM event_notifications ORDER BY chat_id,user_id",
         )
         .unwrap();
@@ -164,6 +164,27 @@ async fn same_match_notifications_as_python() {
     .await
     .expect("match request notification");
 
+    {
+        let db = profiles.db.lock().unwrap();
+        db.execute("UPDATE matches SET deleted_at=?1 WHERE id=1", [now])
+            .unwrap();
+    }
+    sqassit::match_notify::notify(
+        &profiles,
+        &fake,
+        &sqassit::event_notify::EventNotifier::default(),
+        sqassit::match_notify::MatchChange {
+            base: "https://example.test",
+            id: 1,
+            user: 1,
+            status: "deleted",
+            change: sqassit::match_notify::Change::Deleted,
+            now,
+        },
+    )
+    .await
+    .expect("match deletion notification");
+
     assert_eq!(
         json!(fake.calls.lock().unwrap().clone()),
         expected["calls"],
@@ -171,4 +192,27 @@ async fn same_match_notifications_as_python() {
     );
     let db = profiles.db.lock().unwrap();
     assert_eq!(json!(rows(&db)), expected["notifications"], "notifications");
+    let deadlines = {
+        let mut stmt = db
+            .prepare("SELECT chat_id,delete_at FROM event_notifications ORDER BY chat_id,user_id")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    };
+    assert_eq!(
+        deadlines,
+        vec![
+            (1, Some(now + 25_200)),
+            (2, Some(now + 25_200)),
+            (3, Some(now + 25_200)),
+            (5, Some(now + 25_200)),
+            // A notification created after deletion falls back to 24 hours.
+            (6, Some(now + 86_400)),
+            (7, Some(now + 25_200)),
+        ]
+    );
 }

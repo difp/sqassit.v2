@@ -37,7 +37,7 @@ A fourth opt-in test compares expired-notification cleanup for training cards, c
 
 A fifth opt-in test compares preliminary-to-final enrollment replacement: the final message text, the sent and deleted messages, and the updated notification row. It also covers a booked player with training notifications disabled, whose preliminary message and row are removed. The order of unrelated user calls is not compared.
 
-A sixth opt-in test compares match notifications for an existing card: a player leaving, then a new pending request. It checks the management card and pending-application keyboard, booked-player updates, personal status text, edits of existing messages, notification rows and their expiry. Deletion, approval/rejection and promotion notifications are not compared.
+A sixth opt-in test compares match notifications for an existing card: a player leaving, a new pending request, and organizer deletion. It checks the management card and pending-application keyboard, booked-player updates, personal status text, edits of existing messages, notification rows and their expiry. Approval/rejection and promotion notifications are not compared.
 
 A seventh opt-in test compares chat notifications: the first message sends an alert without the message body, a repeat edits the existing alert, the coach receives the reciprocal text, and a recipient with messages disabled receives nothing. Notification rows and their 24-hour expiry are checked.
 
@@ -47,7 +47,7 @@ Another cross-language test compares new and synthetic old databases after migra
 
 This is **not yet a verified replacement**. All 75 reference HTTP routes are wired and the existing templates/static assets are served, but remaining release gates are:
 
-- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out, mixed-kind cleanup ordering, and match deletion/approval/promotion notifications are not compared.
+- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out, mixed-kind cleanup ordering, and match approval/rejection/promotion notifications are not compared.
 - Real Telegram polling, webhook registration, notifications, reminders and restart/concurrency behavior remain unverified; delivery is best-effort and can duplicate after a side effect fails.
 - Browser Mini App scenarios, ICS, Unicode, avatar download/ETag and CSP behavior need end-to-end checks against Telegram, and load/large-dataset performance is unmeasured.
 - Backup/restore, deployment on the target platform and rollback have not been rehearsed; the Xray/VLESS scripts remain Python-only.
