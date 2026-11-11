@@ -22,7 +22,8 @@ pub(crate) fn manager(
     init: &str,
     now: i64,
 ) -> Result<i64, ProfileError> {
-    let actor = coach::coach(profiles, db, init, now)?;
+    let (actor, user) = profiles.user_id(init, now)?;
+    profiles.register(db, actor, &user, now)?;
     let allowed = actor == profiles.owner
         || db
             .query_row(
@@ -156,7 +157,8 @@ pub fn set_manager(
     value: ManagerInput,
 ) -> Result<Value, ProfileError> {
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
-    let actor = coach::coach(profiles, &db, init, now)?;
+    let (actor, user) = profiles.user_id(init, now)?;
+    profiles.register(&db, actor, &user, now)?;
     if actor != profiles.owner {
         return Err(ProfileError::Forbidden("Доступ только для владельца."));
     }
