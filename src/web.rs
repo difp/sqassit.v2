@@ -798,6 +798,16 @@ async fn coach_create(
     })
     .await
 }
+async fn coach_create_batch(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::coach::TrainingBatch>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::create_batch(&p, &i, n, body)
+    })
+    .await
+}
 async fn coach_edit(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1036,6 +1046,7 @@ pub fn router(
         )
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route("/api/coach/trainings/batch", post(coach_create_batch))
         .route("/api/coach/pending", get(coach_pending))
         .route(
             "/api/coach/trainings/{id}/participants",
@@ -1531,6 +1542,55 @@ mod tests {
             let status = r.status();
             let b = to_bytes(r.into_body(), 65536).await.unwrap();
             (status, serde_json::from_slice(&b).unwrap())
+        }
+        let batch = r#"{"period_start":"2099-01-01","period_end":"2099-01-07","weekdays":[0,2,4],"time":"19:00","training_type":"Batch","capacity":2}"#;
+        let path = "/api/coach/trainings/batch";
+        assert_eq!(
+            send(app.clone(), "POST", path, &signed, batch).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, first) = send(coach_app.clone(), "POST", path, &signed, batch).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["created_count"], 3);
+        assert_eq!(first["skipped_count"], 0);
+        let (_, second) = send(coach_app.clone(), "POST", path, &signed, batch).await;
+        assert_eq!(second["created_count"], 0);
+        assert_eq!(second["skipped_count"], 3);
+        assert!(second["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["reason"] == "duplicate"));
+        let invalid = r#"{"period_start":"2099-01-01","period_end":"2099-04-05","weekdays":[0],"time":"19:00"}"#;
+        assert_eq!(
+            send(coach_app.clone(), "POST", path, &signed, invalid)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let past = r#"{"period_start":"2020-01-06","period_end":"2020-01-06","weekdays":[0],"time":"19:00"}"#;
+        let (_, past) = send(coach_app.clone(), "POST", path, &signed, past).await;
+        assert_eq!(past["skipped"][0]["reason"], "past");
+        coach_db.lock().unwrap().execute_batch("CREATE TRIGGER fail_second_batch BEFORE INSERT ON trainings WHEN NEW.training_type='Fail batch' AND EXISTS(SELECT 1 FROM trainings WHERE training_type='Fail batch') BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        let fail = batch.replace("Batch", "Fail batch");
+        assert_eq!(
+            send(coach_app.clone(), "POST", path, &signed, &fail)
+                .await
+                .0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        {
+            let db = coach_db.lock().unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM trainings WHERE training_type='Fail batch'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            db.execute_batch("DROP TRIGGER fail_second_batch").unwrap();
         }
         assert_eq!(
             send(app.clone(), "GET", "/api/me", "", "").await.0,

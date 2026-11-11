@@ -1,6 +1,6 @@
 //! Coach-owned training management. Notifications are not implemented yet.
 use crate::profile::{ProfileError, Profiles};
-use chrono::{LocalResult, Offset, TimeZone};
+use chrono::{Datelike, LocalResult, Offset, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -38,6 +38,122 @@ pub struct NewTraining {
     pub reminder_offset_min: i64,
     #[serde(default)]
     pub force: bool,
+}
+#[derive(Deserialize)]
+pub struct TrainingBatch {
+    pub period_start: String,
+    pub period_end: String,
+    pub weekdays: Vec<i64>,
+    pub time: String,
+    #[serde(default = "default_type")]
+    pub training_type: String,
+    #[serde(default = "default_capacity")]
+    pub capacity: i64,
+    #[serde(default = "default_duration")]
+    pub duration_min: i64,
+    #[serde(default)]
+    pub level: String,
+    #[serde(default = "default_true")]
+    pub reminder_enabled: bool,
+    #[serde(default = "default_offset")]
+    pub reminder_offset_min: i64,
+}
+/// Create a recurring schedule in one transaction; duplicate and past dates are skipped.
+pub fn create_batch(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    value: TrainingBatch,
+) -> Result<Value, ProfileError> {
+    let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let actor = coach(profiles, &db, init, now)?;
+    if value.period_start.len() != 10
+        || value.period_end.len() != 10
+        || value.time.len() != 5
+        || value.weekdays.is_empty()
+        || value.weekdays.len() > 7
+        || !(1..=100).contains(&value.training_type.chars().count())
+        || !(1..=100).contains(&value.capacity)
+        || !(15..=600).contains(&value.duration_min)
+        || value.level.chars().count() > 60
+        || !(0..=2880).contains(&value.reminder_offset_min)
+    {
+        return Err(ProfileError::Invalid("Некорректные данные тренировки."));
+    }
+    let start = chrono::NaiveDate::parse_from_str(&value.period_start, "%Y-%m-%d")
+        .map_err(|_| ProfileError::Rule(422, "Некорректная дата или время."))?;
+    let end = chrono::NaiveDate::parse_from_str(&value.period_end, "%Y-%m-%d")
+        .map_err(|_| ProfileError::Rule(422, "Некорректная дата или время."))?;
+    chrono::NaiveTime::parse_from_str(&value.time, "%H:%M")
+        .map_err(|_| ProfileError::Rule(422, "Некорректная дата или время."))?;
+    let length = (end - start).num_days();
+    if length < 0 {
+        return Err(ProfileError::Rule(422, "Дата окончания раньше начала"));
+    }
+    if length > 92 {
+        return Err(ProfileError::Rule(
+            422,
+            "Период слишком длинный: максимум 92 дня",
+        ));
+    }
+    if value.weekdays.iter().any(|d| !(0..=6).contains(d)) {
+        return Err(ProfileError::Rule(422, "Некорректные дни недели"));
+    }
+    let level = value.level.trim();
+    if !level.is_empty()
+        && ![
+            "Новичок (Into)",
+            "Начинающий (Beginner)",
+            "Уверенный любитель (С)",
+        ]
+        .contains(&level)
+    {
+        return Err(ProfileError::Rule(422, "Неизвестный уровень игры"));
+    }
+    let dates: Vec<_> = (0..=length)
+        .filter_map(|offset| start.checked_add_signed(chrono::Duration::days(offset)))
+        .filter(|date| {
+            value
+                .weekdays
+                .contains(&i64::from(date.weekday().num_days_from_monday()))
+        })
+        .collect();
+    if dates.is_empty() {
+        return Err(ProfileError::Rule(
+            422,
+            "В выбранном периоде нет таких дней недели",
+        ));
+    }
+    if dates.len() > 100 {
+        return Err(ProfileError::Rule(
+            422,
+            "Слишком много тренировок: максимум 100",
+        ));
+    }
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ProfileError::Storage)?;
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for day in dates {
+        let date = day.format("%Y-%m-%d").to_string();
+        let timestamp = local_timestamp(&date, &value.time, profiles.timezone)?;
+        if timestamp <= now {
+            skipped.push(json!({"date":date,"reason":"past"}));
+            continue;
+        }
+        let duplicate:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM trainings WHERE deleted_at IS NULL AND start_at=?1 AND training_type=?2 AND created_by=?3)",params![timestamp,value.training_type,actor],|r|r.get(0)).map_err(|_|ProfileError::Storage)?;
+        if duplicate {
+            skipped.push(json!({"date":date,"reason":"duplicate"}));
+            continue;
+        }
+        tx.execute("INSERT INTO trainings(title,training_type,start_at,duration_min,capacity,level,reminder_offset_min,reminder_enabled,created_by,created_at) VALUES(?1,?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![value.training_type,timestamp,value.duration_min,value.capacity,level,value.reminder_offset_min,value.reminder_enabled,actor,now]).map_err(|_|ProfileError::Storage)?;
+        created.push(tx.last_insert_rowid());
+    }
+    tx.commit().map_err(|_| ProfileError::Storage)?;
+    Ok(
+        json!({"ok":true,"created_count":created.len(),"created":created,"skipped_count":skipped.len(),"skipped":skipped}),
+    )
 }
 pub(crate) fn coach(
     profiles: &Profiles,
