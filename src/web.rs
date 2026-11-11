@@ -20,6 +20,7 @@ pub struct WebState {
     pub allow_dev_init_data: bool,
     pub profiles: Option<crate::profile::Profiles>,
     pub bot: Option<crate::updates::BotRuntime>,
+    pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -197,6 +198,122 @@ async fn api_trainings(
         crate::trainings::list(&p, &i, n, query.days, p.timezone)
     })
     .await
+}
+#[derive(Default, serde::Deserialize)]
+struct AvatarQuery {
+    #[serde(default)]
+    token: String,
+}
+async fn avatar_response(
+    state: WebState,
+    headers: HeaderMap,
+    id: i64,
+    version: Option<String>,
+    query: AvatarQuery,
+) -> Response {
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let Some((cache, client)) = state.avatar else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Avatar service is not configured."})),
+        )
+            .into_response();
+    };
+    match cache
+        .get(
+            &profiles,
+            &client,
+            id,
+            &query.token,
+            version.as_deref(),
+            now(),
+        )
+        .await
+    {
+        Ok(avatar) => {
+            let etag = format!("\"{}\"", avatar.version);
+            let caching = if avatar.immutable {
+                "private, max-age=604800, immutable"
+            } else {
+                "private, no-cache"
+            };
+            let matches = headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| {
+                    v.split(',').map(str::trim).any(|candidate| {
+                        candidate == "*" || candidate == etag || candidate == format!("W/{etag}")
+                    })
+                });
+            if matches {
+                (
+                    StatusCode::NOT_MODIFIED,
+                    [
+                        (header::CACHE_CONTROL, caching.to_owned()),
+                        (header::ETAG, etag),
+                    ],
+                )
+                    .into_response()
+            } else {
+                (
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            crate::avatar::media_type(&avatar.content).to_owned(),
+                        ),
+                        (header::CACHE_CONTROL, caching.to_owned()),
+                        (header::ETAG, etag),
+                    ],
+                    avatar.content.as_ref().clone(),
+                )
+                    .into_response()
+            }
+        }
+        Err(error) => {
+            let (status, detail) = match error {
+                crate::avatar::AvatarError::Unauthorized => {
+                    (StatusCode::UNAUTHORIZED, "Требуется авторизация.")
+                }
+                crate::avatar::AvatarError::Hidden => (StatusCode::NOT_FOUND, "Аватарка скрыта."),
+                crate::avatar::AvatarError::NotFound => {
+                    (StatusCode::NOT_FOUND, "Аватарка недоступна.")
+                }
+                crate::avatar::AvatarError::TooLarge => {
+                    (StatusCode::BAD_GATEWAY, "Аватарка слишком большая.")
+                }
+                crate::avatar::AvatarError::Unavailable => {
+                    (StatusCode::BAD_GATEWAY, "Telegram недоступен.")
+                }
+                crate::avatar::AvatarError::Database => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Внутренняя ошибка сервера",
+                ),
+            };
+            (status, Json(json!({"detail":detail}))).into_response()
+        }
+    }
+}
+async fn avatar_legacy(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<AvatarQuery>,
+) -> Response {
+    avatar_response(state, headers, id, None, query).await
+}
+async fn avatar_versioned(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((id, version)): Path<(i64, String)>,
+    Query(query): Query<AvatarQuery>,
+) -> Response {
+    avatar_response(state, headers, id, Some(version), query).await
 }
 #[derive(Default, serde::Deserialize)]
 struct CalendarQuery {
@@ -492,6 +609,11 @@ pub fn router(
     profiles: Option<crate::profile::Profiles>,
     bot: Option<crate::updates::BotRuntime>,
 ) -> Router {
+    let proxy = std::env::var("BOT_PROXY").unwrap_or_default();
+    let avatar = profiles
+        .as_ref()
+        .and_then(|p| crate::telegram::TelegramClient::new(p.bot_token.clone(), Some(&proxy)).ok())
+        .map(|client| (crate::avatar::AvatarCache::default(), client));
     Router::new()
         .route("/", get(player))
         .route("/coach", get(coach))
@@ -499,6 +621,8 @@ pub fn router(
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
         .route("/api/players/{token}", get(api_public_profile))
+        .route("/api/avatar/{id}", get(avatar_legacy))
+        .route("/api/avatar/{id}/{version}", get(avatar_versioned))
         .route("/api/trainings", get(api_trainings))
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
@@ -550,6 +674,7 @@ pub fn router(
             allow_dev_init_data,
             profiles,
             bot,
+            avatar,
         })
 }
 
@@ -1090,5 +1215,108 @@ mod tests {
         assert!(std::str::from_utf8(&body).unwrap().contains("Forbidden"));
         let retry = app.oneshot(request(secret)).await.unwrap();
         assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    #[tokio::test]
+    async fn avatar_response_enforces_privacy_and_conditional_cache() {
+        struct Source;
+        impl crate::avatar::AvatarSource for Source {
+            async fn profile_photo(
+                &self,
+                _: i64,
+            ) -> Result<Option<String>, crate::avatar::AvatarError> {
+                Ok(None)
+            }
+            async fn download(
+                &self,
+                _: &str,
+            ) -> Result<Option<Vec<u8>>, crate::avatar::AvatarError> {
+                Ok(Some(b"GIF89atest".to_vec()))
+            }
+        }
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute("INSERT INTO users(telegram_id,avatar_file_id,display_mode,created_at) VALUES(42,'file','name',0)",[]).unwrap();
+        let profiles = crate::profile::Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "test-token".into(),
+            owner: 1,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
+        };
+        let cache = crate::avatar::AvatarCache::default();
+        let token = crate::auth::issue_scoped_token("test-token", "avatar", 42, 42, now(), 604800);
+        let version = profiles.avatar_version(42, Some("file"));
+        cache
+            .get(&profiles, &Source, 42, &token, Some(&version), now())
+            .await
+            .unwrap();
+        let state = WebState {
+            allow_dev_init_data: false,
+            profiles: Some(profiles.clone()),
+            bot: None,
+            avatar: Some((
+                cache,
+                crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
+            )),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_str(&format!("W/\"{version}\"")).unwrap(),
+        );
+        let result = avatar_response(
+            state.clone(),
+            headers,
+            42,
+            Some(version.clone()),
+            AvatarQuery {
+                token: token.clone(),
+            },
+        )
+        .await;
+        assert_eq!(result.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            result.headers()[header::CACHE_CONTROL],
+            "private, max-age=604800, immutable"
+        );
+        assert_eq!(
+            avatar_response(
+                state.clone(),
+                HeaderMap::new(),
+                42,
+                None,
+                AvatarQuery {
+                    token: "bad".into()
+                }
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET display_mode='animal' WHERE telegram_id=42",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            avatar_response(
+                state,
+                HeaderMap::new(),
+                42,
+                Some(version),
+                AvatarQuery { token }
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

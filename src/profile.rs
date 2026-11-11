@@ -120,20 +120,23 @@ impl Profiles {
         db.execute("INSERT INTO users (telegram_id, username, first_name, is_coach, created_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, is_coach=excluded.is_coach WHERE username IS NOT excluded.username OR first_name IS NOT excluded.first_name OR is_coach IS NOT excluded.is_coach", params![id, username, first_name, coach, now]).map_err(|_| ProfileError::Storage)?;
         Ok(())
     }
-    pub(crate) fn avatar_url(&self, id: i64, file: Option<&str>, real: bool, now: i64) -> String {
+    pub(crate) fn avatar_version(&self, id: i64, file: Option<&str>) -> String {
         let payload = format!(
             "avatar-version:{id}:{}",
             file.filter(|s| !s.is_empty()).unwrap_or("none")
         );
         let mut mac = Hmac::<Sha256>::new_from_slice(self.bot_token.as_bytes()).expect("HMAC key");
         mac.update(payload.as_bytes());
-        let version = hex::encode(mac.finalize().into_bytes());
+        hex::encode(mac.finalize().into_bytes())[..12].to_owned()
+    }
+    pub(crate) fn avatar_url(&self, id: i64, file: Option<&str>, real: bool, now: i64) -> String {
+        let version = self.avatar_version(id, file);
         let kind = if real { "avatar_real" } else { "avatar" };
         let token = auth::issue_scoped_token(&self.bot_token, kind, id, id, now, 604_800);
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("token", &token)
             .finish();
-        format!("/api/avatar/{id}/{}?{query}", &version[..12])
+        format!("/api/avatar/{id}/{version}?{query}")
     }
     pub fn me(&self, init: &str, now: i64) -> Result<Value, ProfileError> {
         let (id, user) = self.user_id(init, now)?;

@@ -2,6 +2,7 @@
 //! This crate is not yet a replacement for the Python application.
 
 pub mod auth;
+pub mod avatar;
 pub mod booking;
 pub mod bot;
 pub mod bot_slots;

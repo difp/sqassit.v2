@@ -20,7 +20,9 @@ impl TelegramClient {
         if token.trim().is_empty() {
             return Err(TelegramError::Configuration);
         }
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
         if let Some(proxy) = proxy.filter(|p| !p.trim().is_empty()) {
             builder = builder
                 .proxy(reqwest::Proxy::all(proxy).map_err(|_| TelegramError::Configuration)?);
@@ -131,5 +133,74 @@ pub trait BotTransport: Send + Sync {
 impl BotTransport for TelegramClient {
     async fn request(&self, method: &str, payload: Value) -> Result<Value, TelegramError> {
         self.call(method, payload).await
+    }
+}
+
+impl crate::avatar::AvatarSource for TelegramClient {
+    async fn profile_photo(&self, user: i64) -> Result<Option<String>, crate::avatar::AvatarError> {
+        let value = self
+            .call("getUserProfilePhotos", json!({"user_id":user,"limit":1}))
+            .await
+            .map_err(|_| crate::avatar::AvatarError::Unavailable)?;
+        Ok(value
+            .pointer("/result/photos/0")
+            .and_then(Value::as_array)
+            .and_then(|a| a.last())
+            .and_then(|p| p.get("file_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+    async fn download(&self, file: &str) -> Result<Option<Vec<u8>>, crate::avatar::AvatarError> {
+        let result = self
+            .call("getFile", json!({"file_id":file}))
+            .await
+            .map_err(|_| crate::avatar::AvatarError::Unavailable)?;
+        let Some(path) = result.pointer("/result/file_path").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        // Telegram paths are relative; never permit a response to redirect the bot token to another origin.
+        if path.is_empty()
+            || path.starts_with('/')
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || !path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.'))
+        {
+            return Err(crate::avatar::AvatarError::Unavailable);
+        }
+        let url = format!("https://api.telegram.org/file/bot{}/{path}", self.token);
+        let mut response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| crate::avatar::AvatarError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(crate::avatar::AvatarError::Unavailable);
+        }
+        if response
+            .content_length()
+            .is_some_and(|n| n > crate::avatar::MAX_BYTES as u64)
+        {
+            return Err(crate::avatar::AvatarError::TooLarge);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| crate::avatar::AvatarError::Unavailable)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > crate::avatar::MAX_BYTES {
+                return Err(crate::avatar::AvatarError::TooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(bytes))
+        }
     }
 }
