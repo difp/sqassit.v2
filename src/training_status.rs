@@ -287,7 +287,7 @@ pub async fn refresh<T: BotTransport>(
     };
     let rows = {
         let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-        let mut stmt=db.prepare("SELECT n.id,n.kind,n.message_id,n.phase,n.text,n.chat_id,b.status FROM event_notifications n JOIN bookings b ON b.training_id=n.entity_id AND b.user_id=n.user_id JOIN users u ON u.telegram_id=n.chat_id WHERE n.entity_id=?1 AND n.kind IN ('training_booked','training_waitlist','training_rejected') AND n.message_id!=0 AND u.notifications_enabled=1 AND u.notify_trainings=1").map_err(|_|NotifyError::Database)?;
+        let mut stmt=db.prepare("SELECT n.id,n.kind,n.message_id,n.phase,n.text,n.chat_id,b.status FROM event_notifications n JOIN bookings b ON b.training_id=n.entity_id AND b.user_id=n.user_id JOIN users u ON u.telegram_id=n.chat_id WHERE n.entity_id=?1 AND n.kind IN ('training_booked','training_waitlist','training_rejected','training_reminder') AND n.message_id!=0 AND u.notifications_enabled=1 AND u.notify_trainings=1").map_err(|_|NotifyError::Database)?;
         let rows = stmt
             .query_map([training], |r| {
                 Ok((
@@ -310,6 +310,7 @@ pub async fn refresh<T: BotTransport>(
             ("training_booked", "booked") => booked_text(&s, phase == "preliminary"),
             ("training_waitlist", "waitlist") => status_text(&s, "waitlist"),
             ("training_rejected", "rejected") => status_text(&s, "rejected"),
+            ("training_reminder", "booked") => s.reminder.clone(),
             _ => continue,
         };
         if text == old {

@@ -34,21 +34,22 @@ pub(crate) struct Snapshot {
     owner: Option<i64>,
     deleted: bool,
     brief: String,
+    pub(crate) reminder: String,
     pub(crate) start: i64,
     pub(crate) duration: i64,
 }
 pub(crate) fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
     let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-    type TrainingRow = (String, String, i64, Option<i64>, Option<i64>, i64);
+    type TrainingRow = (String, String, i64, Option<i64>, Option<i64>, i64, i64);
     let event: Option<TrainingRow> = db
         .query_row(
-            "SELECT training_type,level,start_at,created_by,deleted_at,duration_min FROM trainings WHERE id=?1",
+            "SELECT training_type,level,start_at,created_by,deleted_at,duration_min,capacity FROM trainings WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .optional()
         .map_err(|_| NotifyError::Database)?;
-    let Some((typ, level, start, owner, deleted, duration)) = event else {
+    let Some((typ, level, start, owner, deleted, duration, capacity)) = event else {
         return Ok(None);
     };
     let coach_name: Option<String> = if let Some(owner) = owner {
@@ -97,6 +98,10 @@ pub(crate) fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, Notify
         .format("%d.%m.%Y в %H:%M")
         .to_string();
     let brief = format!("{} · {brief_time}", bot::escape(typ));
+    let reminder = format!(
+        "⏰ <b>Напоминание о тренировке</b>\n\n🏸 {}\n📅 {brief_time}\nВсего мест: {capacity}",
+        bot::escape(typ)
+    );
     let mut stmt=db.prepare("SELECT b.user_id,b.status,u.first_name,u.display_mode FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY CASE b.status WHEN 'booked' THEN 0 ELSE 1 END,b.position ASC").map_err(|_|NotifyError::Database)?;
     let rows = stmt
         .query_map([id], |r| {
@@ -164,6 +169,7 @@ pub(crate) fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, Notify
         owner,
         deleted: deleted.unwrap_or(0) != 0,
         brief,
+        reminder,
         start,
         duration,
     }))
@@ -277,7 +283,12 @@ pub async fn lifecycle<T: BotTransport>(
             .map_err(|_| NotifyError::Database)?
     };
     for (user, status, has_card) in participants {
-        if !matches!(change, Lifecycle::Deleted)
+        // Python recreates separate status messages only for booked players on
+        // restore; other statuses return with the next participation change.
+        let ensure_status = !matches!(change, Lifecycle::Deleted)
+            && (!matches!(change, Lifecycle::Restored)
+                || matches!(status.as_str(), "booked" | "promoted"));
+        if ensure_status
             && crate::training_status::ensure(p, bot, notifier, id, user, &status, now)
                 .await
                 .is_err()
@@ -811,10 +822,16 @@ mod tests {
         .unwrap();
         {
             let calls = bot.0.lock().unwrap();
-            assert_eq!(calls.len(), 3);
+            assert_eq!(calls.len(), 4);
             assert_eq!(calls[0].1["chat_id"], 2);
             assert_eq!(calls[1].1["chat_id"], 2);
             assert_eq!(calls[2].1["chat_id"], 1);
+            assert_eq!(calls[3].0, "editMessageText");
+            assert_eq!(calls[3].1["chat_id"], 2);
+            assert!(calls[3].1["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("⏰ <b>Напоминание о тренировке</b>"));
             let text = calls[2].1["text"].as_str().unwrap();
             assert!(text.contains("&lt;Squash&gt;"));
             assert!(text.contains(identity::animal_identity(2).1));
