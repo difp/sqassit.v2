@@ -3,7 +3,7 @@ use axum::{
     body::{to_bytes, Body},
     http::Request,
 };
-use chrono::{Days, Utc};
+use chrono::{Datelike, Days, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -30,6 +30,15 @@ fn signed(id: i64, name: &str, now: i64) -> String {
 }
 fn normalize(value: &mut Value, test_start: i64) {
     match value {
+        Value::String(text) => {
+            // ICS files stamp the export time; the reference and candidate run seconds apart.
+            if let Some(start) = text.find("DTSTAMP:") {
+                let rest = &text[start + "DTSTAMP:".len()..];
+                if let Some(end) = rest.find(['\r', '\n']) {
+                    text.replace_range(start..start + "DTSTAMP:".len() + end, "DTSTAMP:<clock>");
+                }
+            }
+        }
         Value::Array(values) => values.iter_mut().for_each(|v| normalize(v, test_start)),
         Value::Object(map) => {
             for (key, item) in map.iter_mut() {
@@ -87,10 +96,19 @@ async fn same_profile_and_training_workflow_as_python() {
         .checked_add_days(Days::new(2))
         .unwrap()
         .to_string();
+    let weekday = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .expect("date")
+        .weekday()
+        .num_days_from_monday();
+    let profile_token =
+        sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "profile", 0, 42, now, 86400);
+    let ics_token =
+        sqassit::auth::issue_scoped_token("123456:TEST-TOKEN", "ics", 1, 42, now, 86400);
     let output = std::process::Command::new(python)
         .arg("tests/contract_oracle.py")
         .arg(now.to_string())
         .arg(&date)
+        .arg(weekday.to_string())
         .output()
         .expect("run Python reference");
     assert!(
@@ -102,7 +120,7 @@ async fn same_profile_and_training_workflow_as_python() {
     let expected_responses = std::mem::take(expected["responses"].as_array_mut().unwrap());
     let mut db = rusqlite::Connection::open_in_memory().unwrap();
     sqassit::storage::initialize(&mut db).unwrap();
-    db.execute_batch("INSERT INTO coaches(telegram_id,created_at) VALUES(123,0); INSERT INTO users(telegram_id,first_name,is_coach,created_at) VALUES(123,'Тренер',1,0);").unwrap();
+    db.execute_batch("INSERT INTO coaches(telegram_id,created_at) VALUES(123,0); INSERT INTO users(telegram_id,first_name,is_coach,created_at) VALUES(123,'Тренер',1,0); INSERT INTO bookings(training_id,user_id,status,position,created_at) VALUES(2,43,'pending',0,0),(2,44,'pending',0,0); INSERT INTO match_players(match_id,user_id,status,created_at) VALUES(2,43,'pending',0),(2,44,'pending',0);").unwrap();
     let profiles = Profiles {
         db: Arc::new(Mutex::new(db)),
         bot_token: "123456:TEST-TOKEN".into(),
@@ -192,6 +210,7 @@ async fn same_profile_and_training_workflow_as_python() {
             123,
             Some(json!({"date":date,"time":"14:00","training_type":"Updated"})),
         ),
+        ("GET", "/calendar/1.ics?token=<ics-token>", 0, None),
         ("DELETE", "/api/coach/trainings/1", 123, None),
         ("POST", "/api/coach/trainings/1/restore", 123, None),
         ("GET", "/api/coach/trainings/1/participants", 123, None),
@@ -241,6 +260,7 @@ async fn same_profile_and_training_workflow_as_python() {
         ("POST", "/api/coach/applications/43/approve", 123, None),
         ("GET", "/api/coach/apply", 43, None),
         ("GET", "/api/coach/coaches", 43, None),
+        ("GET", "/api/players/<profile-token>", 43, None),
         (
             "PATCH",
             "/api/coach/coaches/43/manager",
@@ -296,6 +316,9 @@ async fn same_profile_and_training_workflow_as_python() {
         ),
         ("GET", "/api/matches/2/coauthors", 43, None),
         ("DELETE", "/api/matches/2/coauthors/43", 42, None),
+        ("POST", "/api/matches/2/requests/44/approve", 42, None),
+        ("POST", "/api/matches/2/requests/43/reject", 42, None),
+        ("GET", "/api/matches", 43, None),
         ("DELETE", "/api/matches/2", 42, None),
         (
             "POST",
@@ -310,6 +333,44 @@ async fn same_profile_and_training_workflow_as_python() {
         ("DELETE", "/api/coach/coaches/44", 123, None),
         ("GET", "/api/coach/coaches", 42, None),
         ("GET", "/api/coach/players/count", 123, None),
+        // Coach profile, archives, batch creation and participant decisions.
+        ("GET", "/api/coach/profile", 123, None),
+        (
+            "PUT",
+            "/api/coach/profile",
+            123,
+            Some(json!({"bio":"  Кратко о тренере  "})),
+        ),
+        ("GET", "/api/coach/profile", 123, None),
+        ("GET", "/api/coach/pending", 123, None),
+        (
+            "POST",
+            "/api/coach/trainings/batch",
+            123,
+            Some(
+                json!({"period_start":date,"period_end":date,"time":"16:00","weekdays":[weekday],"training_type":"Batch","capacity":1}),
+            ),
+        ),
+        (
+            "POST",
+            "/api/coach/trainings/2/participants/44/approve",
+            123,
+            None,
+        ),
+        (
+            "POST",
+            "/api/coach/trainings/2/participants/43/reject",
+            123,
+            None,
+        ),
+        ("GET", "/api/coach/trainings/2/participants", 123, None),
+        ("DELETE", "/api/coach/trainings/2", 123, None),
+        ("GET", "/api/coach/deleted", 123, None),
+        ("DELETE", "/api/coach/trainings/2/purge", 123, None),
+        ("GET", "/api/coach/deleted", 123, None),
+        ("GET", "/api/coach/history", 123, None),
+        ("GET", "/api/coach/trainings", 123, None),
+        ("GET", "/api/coach/pending", 123, None),
         // Feedback, export and confirmed account deletion.
         (
             "POST",
@@ -326,10 +387,21 @@ async fn same_profile_and_training_workflow_as_python() {
         ),
         ("DELETE", "/api/me", 44, None),
         ("DELETE", "/api/me?confirm=true", 44, None),
+        // Static pages and liveness; HTML is compared byte-for-byte.
+        ("GET", "/", 0, None),
+        ("GET", "/coach", 0, None),
+        ("GET", "/match", 0, None),
+        ("GET", "/tabs", 0, None),
+        ("GET", "/healthz", 0, None),
     ];
     assert_eq!(scenarios.len(), expected_responses.len());
-    for ((method, path, id, body), mut reference) in scenarios.into_iter().zip(expected_responses) {
-        let mut request = Request::builder().method(method).uri(path);
+    for ((method, raw_path, id, body), mut reference) in
+        scenarios.into_iter().zip(expected_responses)
+    {
+        let path = raw_path
+            .replace("<profile-token>", &profile_token)
+            .replace("<ics-token>", &ics_token);
+        let mut request = Request::builder().method(method).uri(&path);
         if id != 0 {
             request = request.header(
                 "x-init-data",
@@ -361,8 +433,10 @@ async fn same_profile_and_training_workflow_as_python() {
             .unwrap();
         let status = response.status().as_u16();
         let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
-        let mut actual =
-            json!({"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()});
+        let mut actual = json!({"status":status,"body":match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+        }});
         normalize(&mut actual, now);
         normalize(&mut reference, now);
         assert_eq!(actual, reference, "{method} {path}");

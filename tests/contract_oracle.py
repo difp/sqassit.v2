@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.abspath("legacy"))
 import httpx2
 from app import database as db
 from app import main
+from app.secure_auth import issue_scoped_token
 
 
 def signed(user, now):
@@ -32,7 +33,9 @@ def discard(coro):
 
 
 async def run():
-    now, date = int(sys.argv[1]), sys.argv[2]
+    now, date, weekday = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+    profile_token = issue_scoped_token(os.environ["BOT_TOKEN"], "profile", 0, 42)
+    ics_token = issue_scoped_token(os.environ["BOT_TOKEN"], "ics", 1, 42)
     main._spawn = discard
     with tempfile.TemporaryDirectory(prefix="sqassit-contract-") as directory:
         await db.connect(os.path.join(directory, "reference.sqlite"))
@@ -44,6 +47,15 @@ async def run():
                 (123, now - 3600),
             )
             await db.upsert_user(telegram_id=123, username=None, first_name="Тренер", is_coach=True)
+            # Pending rows for endpoints that normally need REQUIRE_EVENT_APPROVAL.
+            await db._execute(
+                "INSERT INTO bookings (training_id, user_id, status, position, created_at) "
+                "VALUES (2, 43, 'pending', 0, 0), (2, 44, 'pending', 0, 0)"
+            )
+            await db._execute(
+                "INSERT INTO match_players (match_id, user_id, status, created_at) "
+                "VALUES (2, 43, 'pending', 0), (2, 44, 'pending', 0)"
+            )
             headers = {
                 "coach": {"X-Init-Data": signed({"id":123,"first_name":"Coach"}, now)},
                 "player": {"X-Init-Data": signed({"id":42,"first_name":"Player"}, now)},
@@ -80,6 +92,7 @@ async def run():
                 ("POST", "/api/coach/trainings/1/participants/42/restore", "coach", None),
                 ("PATCH", "/api/coach/trainings/1/reminder", "coach", {"enabled":True,"offset_min":60}),
                 ("PATCH", "/api/coach/trainings/1", "coach", {"date":date,"time":"14:00","training_type":"Updated"}),
+                ("GET", "/calendar/1.ics?token=<ics-token>", "none", None),
                 ("DELETE", "/api/coach/trainings/1", "coach", None),
                 ("POST", "/api/coach/trainings/1/restore", "coach", None),
                 ("GET", "/api/coach/trainings/1/participants", "coach", None),
@@ -109,6 +122,7 @@ async def run():
                 ("POST", "/api/coach/applications/43/approve", "coach", None),
                 ("GET", "/api/coach/apply", "player2", None),
                 ("GET", "/api/coach/coaches", "player2", None),
+                ("GET", "/api/players/<profile-token>", "player2", None),
                 ("PATCH", "/api/coach/coaches/43/manager", "coach", {"enabled":True}),
                 ("GET", "/api/coach/coaches", "coach", None),
                 ("DELETE", "/api/coach/coaches/123", "coach", None),
@@ -129,6 +143,9 @@ async def run():
                 ("POST", "/api/matches/2/coauthors", "player", {"telegram_id":43}),
                 ("GET", "/api/matches/2/coauthors", "player2", None),
                 ("DELETE", "/api/matches/2/coauthors/43", "player", None),
+                ("POST", "/api/matches/2/requests/44/approve", "player", None),
+                ("POST", "/api/matches/2/requests/43/reject", "player", None),
+                ("GET", "/api/matches", "player2", None),
                 ("DELETE", "/api/matches/2", "player", None),
                 ("POST", "/api/coach/apply", "applicant", {"message":"Ещё заявка"}),
                 ("GET", "/api/coach/applications", "coach", None),
@@ -138,18 +155,45 @@ async def run():
                 ("DELETE", "/api/coach/coaches/44", "coach", None),
                 ("GET", "/api/coach/coaches", "player", None),
                 ("GET", "/api/coach/players/count", "coach", None),
+                # Coach profile, archives, batch creation and participant decisions.
+                ("GET", "/api/coach/profile", "coach", None),
+                ("PUT", "/api/coach/profile", "coach", {"bio":"  Кратко о тренере  "}),
+                ("GET", "/api/coach/profile", "coach", None),
+                ("GET", "/api/coach/pending", "coach", None),
+                ("POST", "/api/coach/trainings/batch", "coach", {"period_start":date,"period_end":date,"time":"16:00","weekdays":[weekday],"training_type":"Batch","capacity":1}),
+                ("POST", "/api/coach/trainings/2/participants/44/approve", "coach", None),
+                ("POST", "/api/coach/trainings/2/participants/43/reject", "coach", None),
+                ("GET", "/api/coach/trainings/2/participants", "coach", None),
+                ("DELETE", "/api/coach/trainings/2", "coach", None),
+                ("GET", "/api/coach/deleted", "coach", None),
+                ("DELETE", "/api/coach/trainings/2/purge", "coach", None),
+                ("GET", "/api/coach/deleted", "coach", None),
+                ("GET", "/api/coach/history", "coach", None),
+                ("GET", "/api/coach/trainings", "coach", None),
+                ("GET", "/api/coach/pending", "coach", None),
                 # Feedback, export and confirmed account deletion.
                 ("POST", "/api/feedback", "player", {"kind":"idea","text":"  Идея  ","page":"Матч"}),
                 ("GET", "/api/me/export", "player", None),
                 ("POST", "/api/feedback", "player", {"kind":"bug","text":"ok","page":"unknown"}),
                 ("DELETE", "/api/me", "applicant", None),
                 ("DELETE", "/api/me?confirm=true", "applicant", None),
+                # Static pages and liveness; HTML is compared byte-for-byte.
+                ("GET", "/", "none", None),
+                ("GET", "/coach", "none", None),
+                ("GET", "/match", "none", None),
+                ("GET", "/tabs", "none", None),
+                ("GET", "/healthz", "none", None),
             ]
             async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=main.app), base_url="http://reference") as client:
                 result = []
-                for method, path, actor, body in scenarios:
+                for method, raw_path, actor, body in scenarios:
+                    path = raw_path.replace("<profile-token>", profile_token).replace("<ics-token>", ics_token)
                     response = await client.request(method, path, headers=headers[actor], **({"json":body} if body is not None else {}))
-                    result.append({"status":response.status_code,"body":response.json()})
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = response.text
+                    result.append({"status":response.status_code,"body":payload})
             queries = {
                 "users": "SELECT telegram_id,first_name,is_coach,about,display_mode,show_username,phone,notifications_enabled,notify_matches,notify_trainings,notify_messages,onboarding_seen FROM users ORDER BY telegram_id",
                 "trainings": "SELECT id,title,training_type,start_at,capacity,reminder_enabled,reminder_offset_min,reminder_sent,created_by,deleted_at FROM trainings ORDER BY id",
