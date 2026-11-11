@@ -10,6 +10,8 @@ With Rust installed, run `cargo run` from the repository root and open `http://1
 
 Run `cargo test --locked` for the current Rust checks. Progress and remaining work are documented in [MIGRATION-STATUS.md](MIGRATION-STATUS.md).
 
+For a local release smoke test, run `cargo build --release --locked` followed by `python3 tests/release_smoke.py target/release/sqassit`. The test stages the binary and static files in a temporary directory, starts it without credentials, checks its HTTP responses and stops it. CI runs the same check. This is a packaging check, not production deployment validation.
+
 The Python/Rust contract tests use separate temporary databases and suppress Telegram background tasks. Install `legacy/requirements.txt` and `httpx2==2.14.0` in a Python 3.12 environment, then run `SQASSIT_REFERENCE_PYTHON=/path/to/python cargo test --locked --test python_contract --test schema_contract -- --ignored`. They compare a limited profile, training, coach management, waitlist, match and private-chat workflow, selected final data, and the migration of a synthetic old SQLite schema. Timestamps and scoped-token values are normalized, so this is not complete parity verification. CI runs them separately. The Python SQLite worker may require running outside restrictive sandboxes.
 
 Experimental training reminders can be enabled explicitly with `SQASSIT_ENABLE_REMINDERS=true`, a test bot token and a test database. This sends real Telegram messages. Run at most one scheduler per database. This preview is not suitable for production. `BOT_PROXY` can configure HTTP or SOCKS proxy access.
