@@ -1663,6 +1663,16 @@ async fn headers(request: Request, next: Next) -> Response {
     if path.starts_with("/static/") {
         h.entry(header::CACHE_CONTROL)
             .or_insert(HeaderValue::from_static("public, max-age=604800"));
+        // Python's StaticFiles adds a charset to text responses; mirror it so
+        // Cyrillic static pages are decoded the same way.
+        if let Some(value) = h.get(header::CONTENT_TYPE) {
+            let value = value.to_str().unwrap_or("");
+            if value.starts_with("text/") && !value.to_ascii_lowercase().contains("charset=") {
+                if let Ok(updated) = HeaderValue::from_str(&format!("{value}; charset=utf-8")) {
+                    h.insert(header::CONTENT_TYPE, updated);
+                }
+            }
+        }
     } else if path == "/" || path == "/coach" {
         h.entry(header::CACHE_CONTROL)
             .or_insert(HeaderValue::from_static("no-cache"));

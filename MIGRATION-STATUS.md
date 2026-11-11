@@ -41,6 +41,8 @@ A sixth opt-in test compares match notifications for an existing card: a player 
 
 A seventh opt-in test compares chat notifications: the first message sends an alert without the message body, a repeat edits the existing alert, the coach receives the reciprocal text, and a recipient with messages disabled receives nothing. Notification rows and their 24-hour expiry are checked.
 
+An eighth opt-in test compares security and cache headers on the HTML pages, `/tabs`, health and unauthorized API responses, and static JavaScript/HTML: CSP, `nosniff`, referrer and permissions policies, cache lifetimes and content types. It caught and fixed a missing UTF-8 charset on static files.
+
 Another cross-language test compares new and synthetic old databases after migration: table columns, index metadata and columns, selected data/backfills, and a repeated Rust migration. It does not replace testing against an anonymized copy of the actual production database or a backup/restore rehearsal.
 
 ## Still required
