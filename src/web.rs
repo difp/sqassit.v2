@@ -25,6 +25,7 @@ pub struct WebState {
     pub match_api: crate::match_api::MatchApi,
     pub applications: crate::applications::Applications,
     pub feedback: crate::feedback::Feedback,
+    pub readiness: crate::readiness::Readiness,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -121,12 +122,30 @@ async fn feedback_submit(
         Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
     }
 }
-// Never claim readiness while bot, scheduler and API are missing.
-async fn ready() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"detail":"Rust migration is incomplete."})),
-    )
+// Mirrors the reference readiness contract: the database and Telegram Bot API must both answer.
+async fn ready(State(state): State<WebState>) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(profiles) = state.profiles.as_ref().cloned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"База данных недоступна."})),
+        );
+    };
+    let database_ready = tokio::task::spawn_blocking(move || profiles.ping())
+        .await
+        .unwrap_or(false);
+    if !database_ready {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"База данных недоступна."})),
+        );
+    }
+    if !state.readiness.telegram_ready().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Telegram Bot API недоступен."})),
+        );
+    }
+    (StatusCode::OK, Json(json!({"ok":true})))
 }
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -1661,10 +1680,17 @@ pub fn router(
     let messages = profiles
         .as_ref()
         .map(|p| crate::messages::Messages::new(p.clone()));
-    let avatar = profiles
+    let telegram = profiles
         .as_ref()
-        .and_then(|p| crate::telegram::TelegramClient::new(p.bot_token.clone(), Some(&proxy)).ok())
-        .map(|client| (crate::avatar::AvatarCache::default(), client));
+        .and_then(|p| crate::telegram::TelegramClient::new(p.bot_token.clone(), Some(&proxy)).ok());
+    let avatar = telegram.clone().map(|client| {
+        let root =
+            std::env::var("AVATAR_CACHE_DIR").unwrap_or_else(|_| "./data/cache/avatars".to_owned());
+        (crate::avatar::AvatarCache::new(root), client)
+    });
+    let readiness = telegram
+        .map(|client| crate::readiness::Readiness::new(std::sync::Arc::new(client)))
+        .unwrap_or_default();
     Router::new()
         .route("/", get(player))
         .route("/coach", get(coach))
@@ -1801,6 +1827,7 @@ pub fn router(
             match_api: crate::match_api::MatchApi::default(),
             applications: crate::applications::Applications::default(),
             feedback: crate::feedback::Feedback::default(),
+            readiness,
         })
 }
 
@@ -2293,7 +2320,9 @@ mod tests {
             }
             if url == "/readyz" {
                 let body = to_bytes(response.into_body(), 4096).await.unwrap();
-                assert!(std::str::from_utf8(&body).unwrap().contains("incomplete"));
+                assert!(std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("База данных недоступна."));
             }
         }
     }
@@ -3295,6 +3324,7 @@ mod tests {
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
             )),
+            readiness: crate::readiness::Readiness::default(),
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -3351,5 +3381,94 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND
         );
+    }
+    #[tokio::test]
+    async fn readiness_requires_database_and_caches_telegram_health() {
+        use crate::readiness::{Readiness, TelegramHealth};
+        use std::{
+            future::Future,
+            pin::Pin,
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Arc,
+            },
+        };
+
+        struct Fake {
+            calls: AtomicUsize,
+            ready: AtomicBool,
+        }
+        impl TelegramHealth for Fake {
+            fn get_me(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let ready = self.ready.load(Ordering::SeqCst);
+                Box::pin(async move { ready })
+            }
+        }
+
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        let profiles = crate::profile::Profiles {
+            db: Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "test-token".into(),
+            owner: 1,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: Arc::new(std::sync::Mutex::new(crate::rate_limit::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ))),
+        };
+        let fake = Arc::new(Fake {
+            calls: AtomicUsize::new(0),
+            ready: AtomicBool::new(true),
+        });
+        let state = WebState {
+            allow_dev_init_data: false,
+            profiles: Some(profiles.clone()),
+            bot: None,
+            avatar: None,
+            messages: None,
+            match_api: crate::match_api::MatchApi::default(),
+            applications: crate::applications::Applications::default(),
+            feedback: crate::feedback::Feedback::default(),
+            readiness: Readiness::new(fake.clone()),
+        };
+        assert_eq!(ready(State(state.clone())).await.0, StatusCode::OK);
+        assert_eq!(ready(State(state.clone())).await.0, StatusCode::OK);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+
+        let (status, body) = ready(State(WebState {
+            profiles: None,
+            ..state.clone()
+        }))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["detail"], "База данных недоступна.");
+
+        let offline = Arc::new(Fake {
+            calls: AtomicUsize::new(0),
+            ready: AtomicBool::new(false),
+        });
+        let (status, body) = ready(State(WebState {
+            readiness: Readiness::new(offline),
+            ..state.clone()
+        }))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["detail"], "Telegram Bot API недоступен.");
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = profiles.db.lock().unwrap();
+            panic!("poison the database mutex");
+        }));
+        let (status, body) = ready(State(WebState {
+            profiles: Some(profiles),
+            ..state
+        }))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["detail"], "База данных недоступна.");
     }
 }

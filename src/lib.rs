@@ -28,6 +28,7 @@ pub mod messages;
 pub mod players;
 pub mod profile;
 pub mod rate_limit;
+pub mod readiness;
 pub mod reminders;
 pub mod role_notify;
 pub mod room;

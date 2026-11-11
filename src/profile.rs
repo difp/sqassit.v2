@@ -120,6 +120,17 @@ impl Profiles {
         db.execute("INSERT INTO users (telegram_id, username, first_name, is_coach, created_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, is_coach=excluded.is_coach WHERE username IS NOT excluded.username OR first_name IS NOT excluded.first_name OR is_coach IS NOT excluded.is_coach", params![id, username, first_name, coach, now]).map_err(|_| ProfileError::Storage)?;
         Ok(())
     }
+    /// Liveness probe for readiness: the connection answers a trivial query.
+    pub fn ping(&self) -> bool {
+        self.db
+            .lock()
+            .ok()
+            .and_then(|db| {
+                db.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .ok()
+            })
+            .is_some()
+    }
     pub(crate) fn avatar_version(&self, id: i64, file: Option<&str>) -> String {
         let payload = format!(
             "avatar-version:{id}:{}",

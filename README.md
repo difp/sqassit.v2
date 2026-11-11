@@ -6,7 +6,7 @@ This repository tracks the migration of [SQASSIT](https://github.com/difp/sqassi
 
 ## Rust preview
 
-With Rust installed, run `cargo run` from the repository root and open `http://127.0.0.1:8000`. The preview serves the original pages and implements much of the API, but parity and real Telegram delivery are not yet verified. Set `BOT_TOKEN`, `COACH_TELEGRAM_ID`, and optionally `DB_PATH` to enable authenticated endpoints. With the opt-in bot, booking and cancellation trigger best-effort Telegram notifications. `/readyz` deliberately returns 503, so this build must not be deployed as a replacement. `SQASSIT_BIND` and `SQASSIT_STATIC_DIR` override the bind address and static directory for development.
+With Rust installed, run `cargo run` from the repository root and open `http://127.0.0.1:8000`. The preview serves the original pages and implements much of the API, but parity and real Telegram delivery are not yet verified. Set `BOT_TOKEN`, `COACH_TELEGRAM_ID`, and optionally `DB_PATH` to enable authenticated endpoints. With the opt-in bot, booking and cancellation trigger best-effort Telegram notifications. `/readyz` checks SQLite and Telegram Bot API (`getMe`, cached for 60 seconds) and returns 503 with a Russian detail when either is unavailable; without `BOT_TOKEN` it reports the database as unavailable. This build must not be deployed as a replacement. `SQASSIT_BIND` and `SQASSIT_STATIC_DIR` override the bind address and static directory for development; `AVATAR_CACHE_DIR` selects the avatar disk cache (default `./data/cache/avatars`).
 
 Run `cargo test --locked` for the current Rust checks. Progress and remaining work are documented in [MIGRATION-STATUS.md](MIGRATION-STATUS.md).
 
