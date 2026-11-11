@@ -798,6 +798,43 @@ async fn coach_list(State(state): State<WebState>, headers: HeaderMap) -> Respon
     })
     .await
 }
+async fn registry_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::coach_registry::list(&p, &i, n)
+    })
+    .await
+}
+async fn registry_add(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::coach_registry::CoachInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_registry::add(&p, &i, n, body)
+    })
+    .await
+}
+async fn registry_remove(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_registry::remove(&p, &i, n, id)
+    })
+    .await
+}
+async fn registry_manager(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coach_registry::ManagerInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_registry::set_manager(&p, &i, n, id, body)
+    })
+    .await
+}
 #[derive(serde::Deserialize)]
 struct ArchiveQuery {
     #[serde(default = "archive_limit")]
@@ -1115,6 +1152,15 @@ pub fn router(
         )
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route("/api/coach/coaches", get(registry_list).post(registry_add))
+        .route(
+            "/api/coach/coaches/{id}",
+            axum::routing::delete(registry_remove),
+        )
+        .route(
+            "/api/coach/coaches/{id}/manager",
+            axum::routing::patch(registry_manager),
+        )
         .route("/api/coach/trainings/batch", post(coach_create_batch))
         .route("/api/coach/history", get(coach_history))
         .route("/api/coach/deleted", get(coach_deleted))
@@ -1714,6 +1760,60 @@ mod tests {
         )
         .await;
         assert_eq!(removed["removed"], true);
+        let roster = "/api/coach/coaches";
+        assert_eq!(
+            send(app.clone(), "GET", roster, &signed, "").await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(coach_app.clone(), "GET", roster, &signed, "").await.0,
+            StatusCode::OK
+        );
+        let (_, added) = send(
+            coach_app.clone(),
+            "POST",
+            roster,
+            &signed,
+            r#"{"telegram_id":556}"#,
+        )
+        .await;
+        assert_eq!(added["created"], true);
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "PATCH",
+                "/api/coach/coaches/556/manager",
+                &signed,
+                r#"{"enabled":true}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "DELETE",
+                "/api/coach/coaches/42",
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "DELETE",
+                "/api/coach/coaches/556",
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
         let batch = r#"{"period_start":"2099-01-01","period_end":"2099-01-07","weekdays":[0,2,4],"time":"19:00","training_type":"Batch","capacity":2}"#;
         let path = "/api/coach/trainings/batch";
         assert_eq!(

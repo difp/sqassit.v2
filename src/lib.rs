@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod chat_notify;
 pub mod coach;
 pub mod coach_participants;
+pub mod coach_registry;
 pub mod coauthors;
 pub mod event_notify;
 pub mod identity;
