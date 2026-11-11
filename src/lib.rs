@@ -11,6 +11,7 @@ pub mod chat_notify;
 pub mod coach;
 pub mod coach_participants;
 pub mod coauthors;
+pub mod event_notify;
 pub mod identity;
 pub mod match_api;
 pub mod match_booking;
