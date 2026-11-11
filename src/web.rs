@@ -995,6 +995,57 @@ async fn coach_list(State(state): State<WebState>, headers: HeaderMap) -> Respon
     })
     .await
 }
+#[derive(serde::Deserialize)]
+struct PlayerQuery {
+    #[serde(default)]
+    q: String,
+}
+async fn coach_players(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<PlayerQuery>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::players::list(&p, &i, n, &query.q)
+    })
+    .await
+}
+async fn coach_players_count(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| crate::players::count(&p, &i, n)).await
+}
+async fn coach_player_notes(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::players::NotesInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::players::notes(&p, &i, n, id, body)
+    })
+    .await
+}
+async fn coach_profile_get(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::coach_profile::get(&p, &i, n)
+    })
+    .await
+}
+async fn coach_profile_put(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::coach_profile::TrainerProfile>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach_profile::put(&p, &i, n, body)
+    })
+    .await
+}
+async fn api_levels(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::coach_profile::levels(&p, &i, n)
+    })
+    .await
+}
 async fn club_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| crate::club::list(&p, &i, n)).await
 }
@@ -1655,6 +1706,14 @@ pub fn router(
         )
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route("/api/levels", get(api_levels))
+        .route(
+            "/api/coach/profile",
+            get(coach_profile_get).put(coach_profile_put),
+        )
+        .route("/api/coach/players", get(coach_players))
+        .route("/api/coach/players/count", get(coach_players_count))
+        .route("/api/coach/players/{id}/notes", put(coach_player_notes))
         .route("/api/coach/club/trainings", get(club_list))
         .route("/api/coach/coaches", get(registry_list).post(registry_add))
         .route("/api/coach/apply", get(apply_status).post(apply_create))
@@ -2362,6 +2421,68 @@ mod tests {
         let (_, exported) = send(app.clone(), "GET", "/api/me/export", &signed, "").await;
         assert_eq!(exported["user"]["telegram_id"], 42);
         assert_eq!(exported["feedback"][0]["text"], "Улучшить");
+        assert_eq!(
+            send(app.clone(), "GET", "/api/levels", &signed, "").await.1["levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            send(app.clone(), "GET", "/api/coach/players", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "PUT",
+                "/api/coach/players/314/notes",
+                &signed,
+                r#"{"notes":"unique-note"}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, found) = send(
+            coach_app.clone(),
+            "GET",
+            "/api/coach/players?q=unique-note",
+            &signed,
+            "",
+        )
+        .await;
+        assert_eq!(found["players"][0]["telegram_id"], 314);
+        assert_eq!(found["players"][0]["anonymous"], true);
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "GET",
+                "/api/coach/players/count",
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, bio) = send(
+            coach_app.clone(),
+            "PUT",
+            "/api/coach/profile",
+            &signed,
+            r#"{"bio":"  Coach bio  "}"#,
+        )
+        .await;
+        assert_eq!(bio["profile"]["bio"], "Coach bio");
+        assert_eq!(
+            send(coach_app.clone(), "GET", "/api/coach/profile", &signed, "")
+                .await
+                .1["profile"]["bio"],
+            "Coach bio"
+        );
         coach_db.lock().unwrap().execute("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(900,'Room',?1,0,777)",[now()+3600]).unwrap();
         assert_eq!(
             send(app.clone(), "POST", "/api/trainings/900/room", &signed, "")
