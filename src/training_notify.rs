@@ -498,14 +498,14 @@ pub async fn notify<T: BotTransport>(
         }
     }
     // Telegram edits do not produce a push. Send a separate temporary notice on promotion.
-    if actor.is_some_and(|a| a != user)
-        && status == "cancelled"
-        && allowed(p, user)?
-        && crate::role_notify::notice(p, bot, user, &personal, None, now)
+    if actor.is_some_and(|a| a != user) && status == "cancelled" && allowed(p, user)? {
+        let alert = format!("{}\n{}\n{}", status_text(status), s.player_header, s.date);
+        if crate::role_notify::notice(p, bot, user, &alert, None, now)
             .await
             .is_err()
-    {
-        failed = true;
+        {
+            failed = true;
+        }
     }
     if crate::training_status::refresh(p, bot, notifier, training, now)
         .await
