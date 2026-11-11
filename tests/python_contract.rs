@@ -59,6 +59,19 @@ fn normalize(value: &mut Value, test_start: i64) {
     }
 }
 
+fn normalize_deletion_times(value: &mut Value, test_start: i64) {
+    if let Some(rows) = value.as_array_mut() {
+        for row in rows {
+            if let Some(timestamp) = row.get_mut("deleted_at") {
+                if let Some(deleted) = timestamp.as_i64() {
+                    assert!((deleted - test_start).abs() <= 60);
+                    *timestamp = json!("<clock>");
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires the Python reference dependencies; set SQASSIT_REFERENCE_PYTHON and run --ignored"]
 async fn same_profile_and_training_workflow_as_python() {
@@ -85,7 +98,8 @@ async fn same_profile_and_training_workflow_as_python() {
         "Python reference failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).expect("reference JSON");
+    let mut expected: Value = serde_json::from_slice(&output.stdout).expect("reference JSON");
+    let expected_responses = std::mem::take(expected["responses"].as_array_mut().unwrap());
     let mut db = rusqlite::Connection::open_in_memory().unwrap();
     sqassit::storage::initialize(&mut db).unwrap();
     db.execute_batch("INSERT INTO coaches(telegram_id,created_at) VALUES(123,0); INSERT INTO users(telegram_id,first_name,is_coach,created_at) VALUES(123,'Тренер',1,0);").unwrap();
@@ -101,7 +115,7 @@ async fn same_profile_and_training_workflow_as_python() {
     let app = sqassit::web::router(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
         false,
-        Some(profiles),
+        Some(profiles.clone()),
         None,
     );
     let scenarios: Vec<(&str, &str, i64, Option<Value>)> = vec![
@@ -143,6 +157,46 @@ async fn same_profile_and_training_workflow_as_python() {
         ("POST", "/api/trainings/1/cancel", 43, None),
         (
             "POST",
+            "/api/coach/trainings/1/participants",
+            123,
+            Some(json!({"user_id":42})),
+        ),
+        (
+            "POST",
+            "/api/coach/trainings/1/participants",
+            123,
+            Some(json!({"user_id":43})),
+        ),
+        ("GET", "/api/coach/trainings/1/participants", 123, None),
+        (
+            "POST",
+            "/api/coach/trainings/1/participants/42/cancel",
+            123,
+            None,
+        ),
+        (
+            "POST",
+            "/api/coach/trainings/1/participants/42/restore",
+            123,
+            None,
+        ),
+        (
+            "PATCH",
+            "/api/coach/trainings/1/reminder",
+            123,
+            Some(json!({"enabled":true,"offset_min":60})),
+        ),
+        (
+            "PATCH",
+            "/api/coach/trainings/1",
+            123,
+            Some(json!({"date":date,"time":"14:00","training_type":"Updated"})),
+        ),
+        ("DELETE", "/api/coach/trainings/1", 123, None),
+        ("POST", "/api/coach/trainings/1/restore", 123, None),
+        ("GET", "/api/coach/trainings/1/participants", 123, None),
+        (
+            "POST",
             "/api/matches",
             42,
             Some(json!({"date":date,"time":"13:00","title":"Match"})),
@@ -174,8 +228,8 @@ async fn same_profile_and_training_workflow_as_python() {
         ("GET", "/api/coach/players", 123, None),
         ("PUT", "/api/coach/players/42/notes", 123, Some(json!({}))),
     ];
-    assert_eq!(scenarios.len(), expected.len());
-    for ((method, path, id, body), mut reference) in scenarios.into_iter().zip(expected) {
+    assert_eq!(scenarios.len(), expected_responses.len());
+    for ((method, path, id, body), mut reference) in scenarios.into_iter().zip(expected_responses) {
         let mut request = Request::builder().method(method).uri(path);
         if id != 0 {
             request = request.header(
@@ -211,5 +265,46 @@ async fn same_profile_and_training_workflow_as_python() {
         normalize(&mut actual, now);
         normalize(&mut reference, now);
         assert_eq!(actual, reference, "{method} {path}");
+    }
+    let queries = [
+        ("users", "SELECT telegram_id,first_name,is_coach,about,display_mode,show_username,phone,notifications_enabled,notify_matches,notify_trainings,notify_messages,onboarding_seen FROM users ORDER BY telegram_id"),
+        ("trainings", "SELECT id,title,training_type,start_at,capacity,reminder_enabled,reminder_offset_min,reminder_sent,created_by,deleted_at FROM trainings ORDER BY id"),
+        ("bookings", "SELECT training_id,user_id,status,position FROM bookings ORDER BY training_id,user_id"),
+        ("matches", "SELECT id,title,description,location,start_at,duration_min,max_players,level,created_by,deleted_at FROM matches ORDER BY id"),
+        ("match_players", "SELECT match_id,user_id,status FROM match_players ORDER BY match_id,user_id"),
+        ("messages", "SELECT id,from_user,to_user,text FROM messages ORDER BY id"),
+    ];
+    let db = profiles.db.lock().unwrap();
+    for (name, sql) in queries {
+        let mut statement = db.prepare(sql).unwrap();
+        let names = statement
+            .column_names()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let rows = statement
+            .query_map([], |row| {
+                let mut object = serde_json::Map::new();
+                for (index, name) in names.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        rusqlite::types::ValueRef::Integer(v) => json!(v),
+                        rusqlite::types::ValueRef::Real(v) => json!(v),
+                        rusqlite::types::ValueRef::Text(v) => json!(String::from_utf8_lossy(v)),
+                        rusqlite::types::ValueRef::Blob(_) => panic!("unexpected blob in {name}"),
+                    };
+                    object.insert(name.clone(), value);
+                }
+                Ok(Value::Object(object))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // Deletion timestamps are wall-clock dependent. The state must agree on
+        // whether each record is deleted, while numeric timestamps are checked nearby.
+        let mut actual = json!(rows);
+        let mut reference = expected["state"][name].clone();
+        normalize_deletion_times(&mut actual, now);
+        normalize_deletion_times(&mut reference, now);
+        assert_eq!(actual, reference, "database table {name}");
     }
 }

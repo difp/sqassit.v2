@@ -67,6 +67,16 @@ async def run():
                 ("POST", "/api/trainings/1/cancel", "player", None),
                 ("GET", "/api/trainings?days=7", "player2", None),
                 ("POST", "/api/trainings/1/cancel", "player2", None),
+                ("POST", "/api/coach/trainings/1/participants", "coach", {"user_id":42}),
+                ("POST", "/api/coach/trainings/1/participants", "coach", {"user_id":43}),
+                ("GET", "/api/coach/trainings/1/participants", "coach", None),
+                ("POST", "/api/coach/trainings/1/participants/42/cancel", "coach", None),
+                ("POST", "/api/coach/trainings/1/participants/42/restore", "coach", None),
+                ("PATCH", "/api/coach/trainings/1/reminder", "coach", {"enabled":True,"offset_min":60}),
+                ("PATCH", "/api/coach/trainings/1", "coach", {"date":date,"time":"14:00","training_type":"Updated"}),
+                ("DELETE", "/api/coach/trainings/1", "coach", None),
+                ("POST", "/api/coach/trainings/1/restore", "coach", None),
+                ("GET", "/api/coach/trainings/1/participants", "coach", None),
                 ("POST", "/api/matches", "player", {"date":date,"time":"13:00","title":"Match"}),
                 ("POST", "/api/matches/1/room", "player2", None),
                 ("DELETE", "/api/matches/1", "player2", None),
@@ -90,7 +100,16 @@ async def run():
                 for method, path, actor, body in scenarios:
                     response = await client.request(method, path, headers=headers[actor], **({"json":body} if body is not None else {}))
                     result.append({"status":response.status_code,"body":response.json()})
-            print(json.dumps(result, ensure_ascii=False))
+            queries = {
+                "users": "SELECT telegram_id,first_name,is_coach,about,display_mode,show_username,phone,notifications_enabled,notify_matches,notify_trainings,notify_messages,onboarding_seen FROM users ORDER BY telegram_id",
+                "trainings": "SELECT id,title,training_type,start_at,capacity,reminder_enabled,reminder_offset_min,reminder_sent,created_by,deleted_at FROM trainings ORDER BY id",
+                "bookings": "SELECT training_id,user_id,status,position FROM bookings ORDER BY training_id,user_id",
+                "matches": "SELECT id,title,description,location,start_at,duration_min,max_players,level,created_by,deleted_at FROM matches ORDER BY id",
+                "match_players": "SELECT match_id,user_id,status FROM match_players ORDER BY match_id,user_id",
+                "messages": "SELECT id,from_user,to_user,text FROM messages ORDER BY id",
+            }
+            state = {key: [dict(row) for row in await db._fetchall(query)] for key, query in queries.items()}
+            print(json.dumps({"responses":result,"state":state}, ensure_ascii=False))
         finally:
             await db.close()
 
