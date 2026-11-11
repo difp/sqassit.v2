@@ -153,6 +153,23 @@ async fn same_profile_and_training_workflow_as_python() {
         ),
         ("POST", "/api/me/onboarding", 42, None),
         ("GET", "/api/me", 42, None),
+        (
+            "PUT",
+            "/api/me/profile",
+            42,
+            Some(
+                json!({"about":"Люблю сквош","display_mode":"animal","show_username":false,"phone":"+1"}),
+            ),
+        ),
+        (
+            "PUT",
+            "/api/me/profile",
+            42,
+            Some(
+                json!({"about":"Люблю сквош","display_mode":"animal","show_username":false,"phone":" +7 (999) 123-45-67 "}),
+            ),
+        ),
+        ("GET", "/api/me", 42, None),
         ("GET", "/api/levels", 42, None),
         ("GET", "/api/coach/players", 42, None),
         ("POST", "/api/trainings/999/book", 42, None),
@@ -278,6 +295,7 @@ async fn same_profile_and_training_workflow_as_python() {
         ("POST", "/api/coach/applications/43/approve", 123, None),
         ("GET", "/api/coach/apply", 43, None),
         ("GET", "/api/coach/coaches", 43, None),
+        ("GET", "/api/coach/applications", 43, None),
         ("GET", "/api/players/<profile-token>", 43, None),
         (
             "PATCH",
@@ -285,6 +303,7 @@ async fn same_profile_and_training_workflow_as_python() {
             123,
             Some(json!({"enabled":true})),
         ),
+        ("GET", "/api/coach/applications", 43, None),
         ("GET", "/api/coach/coaches", 123, None),
         ("DELETE", "/api/coach/coaches/123", 123, None),
         ("DELETE", "/api/coach/coaches/43", 123, None),
