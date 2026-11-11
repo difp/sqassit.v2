@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod coach;
 pub mod coach_participants;
 pub mod identity;
+pub mod messages;
 pub mod profile;
 pub mod rate_limit;
 pub mod reminders;

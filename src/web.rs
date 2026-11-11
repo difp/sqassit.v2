@@ -21,6 +21,7 @@ pub struct WebState {
     pub profiles: Option<crate::profile::Profiles>,
     pub bot: Option<crate::updates::BotRuntime>,
     pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
+    pub messages: Option<crate::messages::Messages>,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -115,35 +116,98 @@ where
     };
     let init = init_data(&headers);
     match tokio::task::spawn_blocking(move || operation(profiles, init, now())).await {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(crate::profile::ProfileError::NotFound(message))) => (StatusCode::NOT_FOUND,Json(json!({"detail":message}))).into_response(),
-        Ok(Err(crate::profile::ProfileError::Forbidden(message))) => (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response(),
-        Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
+        Ok(result) => profile_response(result),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
+}
+fn profile_response(result: Result<serde_json::Value, crate::profile::ProfileError>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(crate::profile::ProfileError::NotFound(message)) => (StatusCode::NOT_FOUND,Json(json!({"detail":message}))).into_response(),
+        Err(crate::profile::ProfileError::Forbidden(message)) => (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response(),
+        Err(crate::profile::ProfileError::Unauthorized(message)) => {
             (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
         }
-        Ok(Err(crate::profile::ProfileError::Duplicate(id))) => (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"Такая тренировка уже есть в расписании.","duplicate_id":id}))).into_response(),
-        Ok(Err(crate::profile::ProfileError::Rule(status, message))) => (
+        Err(crate::profile::ProfileError::Duplicate(id)) => (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"Такая тренировка уже есть в расписании.","duplicate_id":id}))).into_response(),
+        Err(crate::profile::ProfileError::Rule(status, message)) => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"ok":false,"error":message})),
         )
             .into_response(),
-        Ok(Err(crate::profile::ProfileError::RateLimited(seconds))) => (
+        Err(crate::profile::ProfileError::RateLimited(seconds)) => (
             StatusCode::TOO_MANY_REQUESTS,
             [(header::RETRY_AFTER, seconds.to_string())],
             Json(json!({"detail":"Слишком много запросов. Попробуйте позже."})),
         )
             .into_response(),
-        Ok(Err(crate::profile::ProfileError::Invalid(message))) => (
+        Err(crate::profile::ProfileError::Invalid(message)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"ok":false,"error":message})),
         )
             .into_response(),
-        _ => (
+        Err(crate::profile::ProfileError::Storage) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"detail":"Внутренняя ошибка сервера"})),
         )
             .into_response(),
     }
+}
+async fn message_work<F>(state: WebState, headers: HeaderMap, operation: F) -> Response
+where
+    F: FnOnce(
+            crate::messages::Messages,
+            String,
+            i64,
+        ) -> Result<serde_json::Value, crate::profile::ProfileError>
+        + Send
+        + 'static,
+{
+    let Some(service) = state.messages else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Message service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    match tokio::task::spawn_blocking(move || operation(service, init, now())).await {
+        Ok(result) => profile_response(result),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
+}
+async fn player_message(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::messages::MessageIn>,
+) -> Response {
+    message_work(state, headers, move |s, i, n| {
+        s.send_to_coach(&i, n, body).map(|_| json!({"ok":true}))
+    })
+    .await
+}
+async fn player_thread(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    message_work(state, headers, |s, i, n| s.thread(&i, n, None)).await
+}
+async fn coach_conversations(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    message_work(state, headers, |s, i, n| s.conversations(&i, n)).await
+}
+async fn coach_thread(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(user): Path<i64>,
+) -> Response {
+    message_work(state, headers, move |s, i, n| s.thread(&i, n, Some(user))).await
+}
+async fn coach_message(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(user): Path<i64>,
+    Json(body): Json<crate::messages::MessageIn>,
+) -> Response {
+    message_work(state, headers, move |s, i, n| {
+        s.coach_reply(&i, n, user, body).map(|_| json!({"ok":true}))
+    })
+    .await
 }
 async fn api_me(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| p.me(&i, n)).await
@@ -610,6 +674,9 @@ pub fn router(
     bot: Option<crate::updates::BotRuntime>,
 ) -> Router {
     let proxy = std::env::var("BOT_PROXY").unwrap_or_default();
+    let messages = profiles
+        .as_ref()
+        .map(|p| crate::messages::Messages::new(p.clone()));
     let avatar = profiles
         .as_ref()
         .and_then(|p| crate::telegram::TelegramClient::new(p.bot_token.clone(), Some(&proxy)).ok())
@@ -620,6 +687,13 @@ pub fn router(
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
+        .route("/api/messages/coach", post(player_message))
+        .route("/api/messages/thread", get(player_thread))
+        .route("/api/coach/messages", get(coach_conversations))
+        .route(
+            "/api/coach/messages/{user}",
+            get(coach_thread).post(coach_message),
+        )
         .route("/api/players/{token}", get(api_public_profile))
         .route("/api/avatar/{id}", get(avatar_legacy))
         .route("/api/avatar/{id}/{version}", get(avatar_versioned))
@@ -675,6 +749,7 @@ pub fn router(
             profiles,
             bot,
             avatar,
+            messages,
         })
 }
 
@@ -992,6 +1067,75 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
+        fn sign_user(id: i64, at: i64) -> String {
+            let user = format!("{{\"id\":{id},\"first_name\":\"U{id}\"}}");
+            let date = at.to_string();
+            let data = format!("auth_date={date}\nuser={user}");
+            let mut key = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+            key.update(b"123456:TEST-TOKEN");
+            let mut mac = Hmac::<Sha256>::new_from_slice(&key.finalize().into_bytes()).unwrap();
+            mac.update(data.as_bytes());
+            let hash = hex::encode(mac.finalize().into_bytes());
+            form_urlencoded::Serializer::new(String::new())
+                .append_pair("auth_date", &date)
+                .append_pair("user", &user)
+                .append_pair("hash", &hash)
+                .finish()
+        }
+        let admin = sign_user(123, now());
+        let second_coach = sign_user(777, now());
+        coach_db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO coaches(telegram_id,created_at) VALUES(777,0)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/messages/coach",
+                &signed,
+                r#"{"text":"hello coach"}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(app.clone(), "GET", "/api/coach/messages/42", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (_, private) = send(app.clone(), "GET", "/api/coach/messages/42", &admin, "").await;
+        assert_eq!(private["messages"][0]["text"], "hello coach");
+        let (_, isolated) = send(
+            app.clone(),
+            "GET",
+            "/api/coach/messages/42",
+            &second_coach,
+            "",
+        )
+        .await;
+        assert_eq!(isolated["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/coach/messages/42",
+                &admin,
+                r#"{"text":"private reply"}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, thread) = send(app.clone(), "GET", "/api/messages/thread", &signed, "").await;
+        assert_eq!(thread["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(thread["messages"][1]["text"], "private reply");
         let (status, booking) =
             send(app.clone(), "POST", "/api/trainings/7/book", &signed, "").await;
         assert_eq!(status, StatusCode::OK);
@@ -1258,6 +1402,7 @@ mod tests {
             allow_dev_init_data: false,
             profiles: Some(profiles.clone()),
             bot: None,
+            messages: None,
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
