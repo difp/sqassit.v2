@@ -522,6 +522,37 @@ async fn match_room(
     let api = state.match_api.clone();
     profile_work(state, headers, move |p, i, n| api.room(&p, &i, n, id)).await
 }
+async fn match_coauthors(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::list(&p, &i, n, id)
+    })
+    .await
+}
+async fn match_add_coauthor(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coauthors::CoauthorInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::add(&p, &i, n, id, body)
+    })
+    .await
+}
+async fn match_remove_coauthor(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((id, user)): Path<(i64, i64)>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::remove(&p, &i, n, id, user)
+    })
+    .await
+}
 async fn match_delete(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -825,6 +856,14 @@ pub fn router(
         .route("/api/matches", get(match_list).post(match_create))
         .route("/api/matches/{id}", axum::routing::delete(match_delete))
         .route("/api/matches/{id}/room", post(match_room))
+        .route(
+            "/api/matches/{id}/coauthors",
+            get(match_coauthors).post(match_add_coauthor),
+        )
+        .route(
+            "/api/matches/{id}/coauthors/{user}",
+            axum::routing::delete(match_remove_coauthor),
+        )
         .route("/api/matches/{id}/join", post(match_join))
         .route("/api/matches/{id}/leave", post(match_leave))
         .route(
@@ -995,6 +1034,76 @@ mod tests {
                 "pending"
             );
         }
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET username='Example' WHERE telegram_id=3",
+                [],
+            )
+            .unwrap();
+        async fn coauthor_action(
+            app: Router,
+            method: &str,
+            uri: &str,
+            actor: i64,
+            body: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("x-init-data", signed(actor))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_owned()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            (
+                status,
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap(),
+            )
+        }
+        let endpoint = "/api/matches/1/coauthors";
+        assert_eq!(
+            coauthor_action(app.clone(), "POST", endpoint, 2, r#"{"telegram_id":3}"#)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let added = coauthor_action(
+            app.clone(),
+            "POST",
+            endpoint,
+            1,
+            r#"{"username":"@example"}"#,
+        )
+        .await;
+        assert_eq!(added.1["telegram_id"], 3);
+        assert_eq!(added.1["created"], true);
+        assert_eq!(
+            coauthor_action(app.clone(), "POST", endpoint, 1, r#"{"telegram_id":3}"#)
+                .await
+                .1["created"],
+            false
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "DELETE", "/api/matches/1/coauthors/3", 3, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "DELETE", "/api/matches/1/coauthors/3", 1, "")
+                .await
+                .1["removed"],
+            true
+        );
         assert_eq!(
             request(app.clone(), "/api/matches/1/room", &signed(2))
                 .await
@@ -1009,6 +1118,9 @@ mod tests {
             .to_owned();
         assert_eq!(code.len(), 11);
         assert!(code.starts_with("SQ-"));
+        let authors = coauthor_action(app.clone(), "GET", endpoint, 2, "").await.1;
+        assert_eq!(authors["can_manage"], false);
+        assert_eq!(authors["coauthors"][0]["telegram_id"], 4);
         assert_eq!(
             request(app.clone(), "/api/matches/1/room", &signed(1))
                 .await
