@@ -103,7 +103,7 @@ pub async fn run_tick<S: ReminderSender>(
 }
 
 /// Remove expired reminder messages; transient errors are retained for retry.
-/// Only chat and reminder notifications are handled here; other kinds remain pending.
+/// Handles chat, match and reminder messages; other kinds remain pending.
 pub async fn cleanup_expired<S: ReminderDeleter>(
     profiles: &Profiles,
     sender: &S,
@@ -111,7 +111,7 @@ pub async fn cleanup_expired<S: ReminderDeleter>(
 ) -> Result<(), ReminderError> {
     let records = {
         let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        let mut stmt=db.prepare("SELECT id,chat_id,message_id FROM event_notifications WHERE kind IN ('training_reminder','chat') AND delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at").map_err(|_|ReminderError::Database)?;
+        let mut stmt=db.prepare("SELECT id,chat_id,message_id FROM event_notifications WHERE kind IN ('training_reminder','chat','match','match_feed') AND delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at").map_err(|_|ReminderError::Database)?;
         let rows = stmt
             .query_map([now], |r| {
                 Ok((
@@ -306,5 +306,17 @@ mod tests {
             0
         );
         assert!(sender.deletions.lock().unwrap().contains(&3));
+        profiles.db.lock().unwrap().execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('match',1,4,4,888,'',0,19103),('match_feed',0,5,5,889,'',0,19103)",[]).unwrap();
+        cleanup_expired(&profiles, &sender, 19_103).await.unwrap();
+        let db = profiles.db.lock().unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM event_notifications WHERE kind IN ('match','match_feed')",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 }
