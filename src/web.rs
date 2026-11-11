@@ -799,6 +799,9 @@ async fn coach_list(State(state): State<WebState>, headers: HeaderMap) -> Respon
     })
     .await
 }
+async fn club_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| crate::club::list(&p, &i, n)).await
+}
 async fn registry_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| {
         crate::coach_registry::list(&p, &i, n)
@@ -1323,6 +1326,7 @@ pub fn router(
         )
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route("/api/coach/club/trainings", get(club_list))
         .route("/api/coach/coaches", get(registry_list).post(registry_add))
         .route("/api/coach/apply", get(apply_status).post(apply_create))
         .route("/api/coach/applications", get(applications_list))
@@ -2104,6 +2108,26 @@ mod tests {
             555
         );
         let roster = "/api/coach/coaches";
+        assert_eq!(
+            send(app.clone(), "GET", "/api/coach/club/trainings", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, club) = send(
+            coach_app.clone(),
+            "GET",
+            "/api/coach/club/trainings",
+            &signed,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(club["trainings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == 901));
         assert_eq!(
             send(app.clone(), "GET", roster, &signed, "").await.0,
             StatusCode::FORBIDDEN
