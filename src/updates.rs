@@ -62,11 +62,8 @@ pub async fn webhook<T: BotTransport>(
         return (403, json!({"ok":false,"error":"Forbidden"}));
     }
     match bot::handle_update(profiles, bot, config.base_url, update, now).await {
-        Ok(()) => (200, json!({"ok":true})),
-        // Keep unsupported updates available for retry rather than silently losing them.
-        Err(BotError::Unsupported | BotError::Database | BotError::Telegram) => {
-            (503, json!({"ok":false}))
-        }
+        Ok(()) | Err(BotError::Unsupported) => (200, json!({"ok":true})),
+        Err(BotError::Database | BotError::Telegram) => (503, json!({"ok":false})),
         Err(BotError::Malformed) => (400, json!({"ok":false})),
     }
 }
@@ -83,17 +80,15 @@ async fn process_batch<T: BotTransport>(
         let Some(id) = update.get("update_id").and_then(Value::as_i64) else {
             return Err(offset);
         };
-        if bot::handle_update(profiles, bot, base, update, now)
-            .await
-            .is_err()
-        {
-            return Err(offset);
+        match bot::handle_update(profiles, bot, base, update, now).await {
+            Ok(()) | Err(BotError::Unsupported) => {}
+            Err(_) => return Err(offset),
         }
         offset = id.saturating_add(1);
     }
     Ok(offset)
 }
-/// Poll with a conservative offset: a failed or unsupported update is never acknowledged.
+/// Ignore unrelated updates; retain failed updates for retry.
 pub async fn poll(runtime: BotRuntime) {
     let mut offset: i64 = 0;
     loop {
@@ -237,11 +232,11 @@ mod tests {
             )
             .await
             .0,
-            503
+            200
         );
     }
     #[tokio::test]
-    async fn polling_keeps_failed_update_unacknowledged() {
+    async fn polling_skips_unrelated_updates() {
         let p = service();
         let bot = Fake::default();
         let messages = vec![
@@ -249,7 +244,27 @@ mod tests {
             json!({"update_id":11,"callback_query":{"id":"x","from":{"id":42},"data":"future:action"}}),
             json!({"update_id":12,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}}),
         ];
+        assert_eq!(process_batch(&p, &bot, "", &messages, 0, 1).await, Ok(13));
+        assert_eq!(*bot.0.lock().unwrap(), 2);
+    }
+    #[tokio::test]
+    async fn polling_keeps_transport_failure_unacknowledged() {
+        struct Failing(Mutex<usize>);
+        impl BotTransport for Failing {
+            async fn request(&self, _: &str, _: Value) -> Result<Value, TelegramError> {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                if *count == 2 {
+                    Err(TelegramError::Transport)
+                } else {
+                    Ok(json!({"ok":true}))
+                }
+            }
+        }
+        let p = service();
+        let bot = Failing(Mutex::new(0));
+        let messages = (10..13).map(|id| json!({"update_id":id,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}})).collect::<Vec<_>>();
         assert_eq!(process_batch(&p, &bot, "", &messages, 0, 1).await, Err(11));
-        assert_eq!(*bot.0.lock().unwrap(), 1);
+        assert_eq!(*bot.0.lock().unwrap(), 2);
     }
 }

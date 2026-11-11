@@ -100,8 +100,8 @@ async fn rules<T: BotTransport>(
     }
     Ok(())
 }
-/// Handles /start, /phone, the user's own contact, and fallback text. Other
-/// existing bot commands return Unsupported until their migration is complete.
+/// Handles the migrated commands, callbacks, contact and fallback text.
+/// Unrelated updates return Unsupported and can be ignored by the receiver.
 pub async fn handle_update<T: BotTransport>(
     profiles: &Profiles,
     bot: &T,

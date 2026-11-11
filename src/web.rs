@@ -3241,8 +3241,8 @@ mod tests {
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
         let body = to_bytes(denied.into_body(), 4096).await.unwrap();
         assert!(std::str::from_utf8(&body).unwrap().contains("Forbidden"));
-        let retry = app.oneshot(request(secret)).await.unwrap();
-        assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let accepted = app.oneshot(request(secret)).await.unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
     }
     #[tokio::test]
     async fn avatar_response_enforces_privacy_and_conditional_cache() {
