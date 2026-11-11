@@ -69,17 +69,22 @@ fn snapshot(profiles: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyErro
     }
     let booked: Vec<_> = players.iter().filter(|p| p.status == "booked").collect();
     let pending = players.iter().filter(|p| p.status == "pending").count();
-    let mut card = format!("{header}\n👥 {}/{}", booked.len(), capacity);
+    let shown: Vec<_> = if deleted.unwrap_or(0) != 0 {
+        players.iter().collect()
+    } else {
+        booked
+    };
+    let mut card = format!("{header}\n👥 {}/{}", shown.len(), capacity);
     if !location.is_empty() {
         card.push_str(&format!("\n📍 {}", bot::escape(&location)));
     }
-    let mut names = booked
+    let mut names = shown
         .iter()
         .take(25)
         .map(|p| bot::escape(&p.name))
         .collect::<Vec<_>>()
         .join(", ");
-    if booked.len() > 25 {
+    if shown.len() > 25 {
         names.push('…');
     }
     if !names.is_empty() {
@@ -326,12 +331,39 @@ mod tests {
         )
         .await
         .unwrap();
-        let calls = bot.0.lock().unwrap();
-        assert!(calls.iter().all(|(_, v)| v["chat_id"] != 4));
-        assert!(calls.iter().any(|(_, v)| v["chat_id"] == 2));
-        assert!(calls
-            .iter()
-            .any(|(_, v)| v["chat_id"] == 3
+        {
+            let calls = bot.0.lock().unwrap();
+            assert!(calls.iter().all(|(_, v)| v["chat_id"] != 4));
+            assert!(calls.iter().any(|(_, v)| v["chat_id"] == 2));
+            assert!(calls.iter().any(|(_, v)| v["chat_id"] == 3
                 && v["text"].as_str().unwrap().contains("листе ожидания")));
+        }
+        p.db.lock()
+            .unwrap()
+            .execute("UPDATE matches SET deleted_at=1002 WHERE id=1", [])
+            .unwrap();
+        notify(
+            &p,
+            &bot,
+            &notifier,
+            MatchChange {
+                base: "https://example.test",
+                id: 1,
+                user: 1,
+                status: "deleted",
+                change: Change::Deleted,
+                now: 1002,
+            },
+        )
+        .await
+        .unwrap();
+        let calls = bot.0.lock().unwrap();
+        for id in [2, 3] {
+            assert!(calls.iter().any(|(_, v)| v["chat_id"] == id
+                && v["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Матч отменён организатором")));
+        }
     }
 }

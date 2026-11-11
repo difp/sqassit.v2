@@ -509,7 +509,10 @@ async fn match_create(
     Json(body): Json<crate::match_api::NewMatch>,
 ) -> Response {
     let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| api.create(&p, &i, n, body)).await
+    match_mutation(state, headers, None, move |p, i, n| {
+        api.create(p, i, n, body)
+    })
+    .await
 }
 async fn match_room(
     State(state): State<WebState>,
@@ -556,7 +559,74 @@ async fn match_delete(
     Path(id): Path<i64>,
 ) -> Response {
     let api = state.match_api.clone();
-    profile_work(state, headers, move |p, i, n| api.delete(&p, &i, n, id)).await
+    match_mutation(state, headers, Some(id), move |p, i, n| {
+        api.delete(p, i, n, id)
+    })
+    .await
+}
+async fn match_mutation<F>(
+    state: WebState,
+    headers: HeaderMap,
+    deleted: Option<i64>,
+    operation: F,
+) -> Response
+where
+    F: FnOnce(
+            &crate::profile::Profiles,
+            &str,
+            i64,
+        ) -> Result<serde_json::Value, crate::profile::ProfileError>
+        + Send
+        + 'static,
+{
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    let worker = profiles.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let timestamp = now();
+        let actor = worker.user_id(&init, timestamp)?.0;
+        let value = operation(&worker, &init, timestamp)?;
+        Ok::<_, crate::profile::ProfileError>((value, actor))
+    })
+    .await;
+    match result {
+        Ok(Ok((value, actor))) => {
+            let id = deleted.or_else(|| value.get("id").and_then(|id| id.as_i64()));
+            if let (Some(bot), Some(id)) = (state.bot, id) {
+                let notifier = state.event_notifier;
+                tokio::spawn(async move {
+                    let (change, status) = if deleted.is_some() {
+                        (crate::match_notify::Change::Deleted, "deleted")
+                    } else {
+                        (crate::match_notify::Change::Event, "joined")
+                    };
+                    let event = crate::match_notify::MatchChange {
+                        base: &bot.base_url,
+                        id,
+                        user: actor,
+                        status,
+                        change,
+                        now: now(),
+                    };
+                    if crate::match_notify::notify(&profiles, &bot.client, &notifier, event)
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("Match notification delivery failed");
+                    }
+                });
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 #[derive(serde::Deserialize)]
 struct MatchQuery {
