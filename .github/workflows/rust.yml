@@ -22,6 +22,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r legacy/requirements.txt httpx2==2.14.0
-      - run: cargo test --locked --test python_contract -- --ignored
+      - run: cargo test --locked --test python_contract --test schema_contract -- --ignored
         env:
           SQASSIT_REFERENCE_PYTHON: python

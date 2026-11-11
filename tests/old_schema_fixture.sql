@@ -1,0 +1,28 @@
+-- Synthetic old schema: remove every column added by the Python migration.
+INSERT INTO users(telegram_id,first_name,created_at) VALUES(42,'Existing',10);
+INSERT INTO trainings(id,title,start_at,created_at) VALUES(7,'Existing training',3000,10);
+INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(7,42,'booked',10);
+INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at) VALUES('training',7,42,42,9,'old card',100);
+ALTER TABLE trainings DROP COLUMN deleted_at;
+ALTER TABLE trainings DROP COLUMN deleted_by;
+ALTER TABLE trainings DROP COLUMN level;
+ALTER TABLE trainings DROP COLUMN room_code;
+ALTER TABLE matches DROP COLUMN room_code;
+ALTER TABLE users DROP COLUMN bio;
+ALTER TABLE users DROP COLUMN links;
+ALTER TABLE users DROP COLUMN about;
+ALTER TABLE users DROP COLUMN display_mode;
+ALTER TABLE users DROP COLUMN show_username;
+ALTER TABLE users DROP COLUMN onboarding_seen;
+ALTER TABLE users DROP COLUMN notify_matches;
+ALTER TABLE users DROP COLUMN notify_trainings;
+ALTER TABLE users DROP COLUMN notify_messages;
+ALTER TABLE users DROP COLUMN phone;
+ALTER TABLE coaches DROP COLUMN is_manager;
+ALTER TABLE match_players DROP COLUMN status;
+ALTER TABLE match_players DROP COLUMN decided_by;
+ALTER TABLE match_players DROP COLUMN decided_at;
+ALTER TABLE event_notifications DROP COLUMN delete_at;
+ALTER TABLE event_notifications DROP COLUMN phase;
+ALTER TABLE event_notifications DROP COLUMN sent_at;
+ALTER TABLE event_notifications DROP COLUMN final_at;

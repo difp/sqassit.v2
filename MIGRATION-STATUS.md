@@ -29,6 +29,8 @@ On 2026-11-11 the Python reference tests ran in an isolated Python 3.12 environm
 
 An opt-in Python/Rust contract test runs a profile, training booking/waitlist/cancellation, coach participant and training management, match and private-chat workflows, including selected access-denied cases, against separate databases. It compares HTTP status and JSON as well as selected columns from six tables after the workflow. It suppresses Python Telegram tasks and checks message timestamps are near the test time and normalizes them, clock-dependent seconds and scoped tokens. The local run passed outside the sandbox; CI is configured to run it with reference dependencies. This covers only a small subset of the API and does not compare outbound Telegram calls or freeze time.
 
+Another cross-language test compares new and synthetic old databases after migration: table columns, index metadata and columns, selected data/backfills, and a repeated Rust migration. It does not replace testing against an anonymized copy of the actual production database or a backup/restore rehearsal.
+
 ## Still required
 
 This is **not a runnable Rust replacement** yet. HTTP routes/templates, the rest of the data access and business logic, bot, notifications/scheduler, operational integration, cross-implementation contract tests and deployment/rollback validation remain to be implemented. Do not deploy this crate in place of the Python application.
