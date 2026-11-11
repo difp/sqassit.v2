@@ -1,4 +1,4 @@
-//! Preview training cards for booking changes; status-phase scheduling remains incomplete.
+//! Training event cards and alerts; Telegram delivery remains a preview.
 use crate::{
     bot,
     event_notify::{EventMessage, EventNotifier, NotifyError},
@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
-fn status_text(status: &str) -> &'static str {
+pub(crate) fn status_text(status: &str) -> &'static str {
     match status {
         "pending" => "Заявка на занятие отправлена.",
         "booked" | "promoted" => "Вы записаны.",
@@ -23,30 +23,32 @@ fn status_text(status: &str) -> &'static str {
         _ => "Запись обновлена.",
     }
 }
-struct Snapshot {
-    player_header: String,
+pub(crate) struct Snapshot {
+    pub(crate) player_header: String,
     manager_header: String,
     summary: String,
-    roster: String,
-    date: String,
+    pub(crate) roster: String,
+    pub(crate) date: String,
     managers: Vec<i64>,
     pending: i64,
     owner: Option<i64>,
     deleted: bool,
     brief: String,
+    pub(crate) start: i64,
+    pub(crate) duration: i64,
 }
-fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
+pub(crate) fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
     let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-    type TrainingRow = (String, String, i64, Option<i64>, Option<i64>);
+    type TrainingRow = (String, String, i64, Option<i64>, Option<i64>, i64);
     let event: Option<TrainingRow> = db
         .query_row(
-            "SELECT training_type,level,start_at,created_by,deleted_at FROM trainings WHERE id=?1",
+            "SELECT training_type,level,start_at,created_by,deleted_at,duration_min FROM trainings WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()
         .map_err(|_| NotifyError::Database)?;
-    let Some((typ, level, start, owner, deleted)) = event else {
+    let Some((typ, level, start, owner, deleted, duration)) = event else {
         return Ok(None);
     };
     let coach_name: Option<String> = if let Some(owner) = owner {
@@ -162,6 +164,8 @@ fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
         owner,
         deleted: deleted.unwrap_or(0) != 0,
         brief,
+        start,
+        duration,
     }))
 }
 fn allowed(p: &Profiles, id: i64) -> Result<bool, NotifyError> {
@@ -273,6 +277,13 @@ pub async fn lifecycle<T: BotTransport>(
             .map_err(|_| NotifyError::Database)?
     };
     for (user, status, has_card) in participants {
+        if !matches!(change, Lifecycle::Deleted)
+            && crate::training_status::ensure(p, bot, notifier, id, user, &status, now)
+                .await
+                .is_err()
+        {
+            failed = true;
+        }
         if !allowed(p, user)? || (matches!(change, Lifecycle::Restored) && !has_card) {
             continue;
         }
@@ -326,6 +337,13 @@ pub async fn lifecycle<T: BotTransport>(
             }
         }
     }
+    if !matches!(change, Lifecycle::Deleted)
+        && crate::training_status::refresh(p, bot, notifier, id, now)
+            .await
+            .is_err()
+    {
+        failed = true;
+    }
     if failed {
         Err(NotifyError::Telegram)
     } else {
@@ -340,7 +358,7 @@ pub struct TrainingChange<'a> {
     pub now: i64,
     pub actor: Option<i64>,
 }
-/// Sends editable cards and selected alerts. The legacy status-card lifecycle remains incomplete.
+/// Sends status messages, editable cards and selected alerts.
 pub async fn notify<T: BotTransport>(
     p: &Profiles,
     bot: &T,
@@ -376,7 +394,9 @@ pub async fn notify<T: BotTransport>(
     } else {
         None
     };
-    let mut failed = false;
+    let mut failed = crate::training_status::ensure(p, bot, notifier, training, user, status, now)
+        .await
+        .is_err();
     if allowed(p, user)?
         && notifier
             .send(
@@ -508,13 +528,18 @@ pub async fn notify<T: BotTransport>(
         }
     }
     // Telegram edits do not produce a push. Send a separate temporary notice on promotion.
-    if (status == "promoted"
-        || (actor.is_some_and(|a| a != user)
-            && matches!(status, "booked" | "waitlist" | "rejected" | "cancelled")))
+    if actor.is_some_and(|a| a != user)
+        && status == "cancelled"
         && allowed(p, user)?
         && crate::role_notify::notice(p, bot, user, &personal, None, now)
             .await
             .is_err()
+    {
+        failed = true;
+    }
+    if crate::training_status::refresh(p, bot, notifier, training, now)
+        .await
+        .is_err()
     {
         failed = true;
     }
@@ -585,7 +610,24 @@ mod tests {
         }
         {
             let db = p.db.lock().unwrap();
-            assert_eq!(db.query_row("SELECT count(*) FROM event_notifications WHERE kind IN ('training_booked','training_reminder')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM event_notifications WHERE kind='training_reminder'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM event_notifications WHERE kind='training_booked'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
             assert_eq!(
                 db.query_row(
                     "SELECT count(*) FROM event_notifications WHERE kind='match'",
@@ -771,14 +813,14 @@ mod tests {
             let calls = bot.0.lock().unwrap();
             assert_eq!(calls.len(), 3);
             assert_eq!(calls[0].1["chat_id"], 2);
-            assert_eq!(calls[1].1["chat_id"], 1);
-            assert_eq!(calls[2].1["chat_id"], 2);
-            let text = calls[1].1["text"].as_str().unwrap();
+            assert_eq!(calls[1].1["chat_id"], 2);
+            assert_eq!(calls[2].1["chat_id"], 1);
+            let text = calls[2].1["text"].as_str().unwrap();
             assert!(text.contains("&lt;Squash&gt;"));
             assert!(text.contains(identity::animal_identity(2).1));
             assert!(!text.contains("Secret"));
             assert_eq!(
-                calls[1].1["reply_markup"]["inline_keyboard"][0][0]["text"],
+                calls[2].1["reply_markup"]["inline_keyboard"][0][0]["text"],
                 "Открыть заявки · 1"
             );
         }
@@ -808,12 +850,12 @@ mod tests {
             p.db.lock()
                 .unwrap()
                 .query_row(
-                    "SELECT delete_at FROM event_notifications WHERE kind='training_reminder'",
+                    "SELECT count(*) FROM event_notifications WHERE kind='training_reminder'",
                     [],
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-            1001
+            0
         );
         let count = bot.0.lock().unwrap().len();
         notify(

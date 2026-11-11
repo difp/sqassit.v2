@@ -20,7 +20,7 @@ pub enum NotifyError {
 }
 #[derive(Clone, Default)]
 pub struct EventNotifier {
-    lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) lock: Arc<tokio::sync::Mutex<()>>,
 }
 pub struct EventMessage<'a> {
     pub kind: &'a str,

@@ -32,6 +32,7 @@ pub mod room;
 pub mod storage;
 pub mod telegram;
 pub mod training_notify;
+pub mod training_status;
 pub mod trainings;
 pub mod updates;
 pub mod web;

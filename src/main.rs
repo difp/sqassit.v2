@@ -241,6 +241,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     eprintln!("Match feed refresh failed; it will be retried");
                 }
+                if sqassit::training_status::tick(
+                    &runtime.profiles,
+                    &runtime.client,
+                    &runtime.notifier,
+                    now,
+                )
+                .await
+                .is_err()
+                {
+                    eprintln!("Training status processing failed; it will be retried");
+                }
             }
         })
     });
