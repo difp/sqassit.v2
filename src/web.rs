@@ -912,6 +912,37 @@ async fn coach_participants(
     })
     .await
 }
+async fn training_coauthors(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::training_list(&p, &i, n, id)
+    })
+    .await
+}
+async fn training_add_coauthor(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<crate::coauthors::CoauthorInput>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::training_add(&p, &i, n, id, body)
+    })
+    .await
+}
+async fn training_remove_coauthor(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((id, user)): Path<(i64, i64)>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coauthors::training_remove(&p, &i, n, id, user)
+    })
+    .await
+}
 async fn coach_add_participant(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1091,6 +1122,14 @@ pub fn router(
         .route(
             "/api/coach/trainings/{id}/participants",
             get(coach_participants).post(coach_add_participant),
+        )
+        .route(
+            "/api/coach/trainings/{id}/coauthors",
+            get(training_coauthors).post(training_add_coauthor),
+        )
+        .route(
+            "/api/coach/trainings/{id}/coauthors/{user}",
+            axum::routing::delete(training_remove_coauthor),
         )
         .route(
             "/api/coach/trainings/{id}/participants/{user}/approve",
@@ -1607,6 +1646,74 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+        {
+            let db = coach_db.lock().unwrap();
+            db.execute("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(901,'Coauthors',?1,0,42),(902,'Other',?1,0,777)",[now()+180*86400]).unwrap();
+            db.execute("INSERT INTO users(telegram_id,username,first_name,created_at) VALUES(555,'OtherCoach','Trainer',0)",[]).unwrap();
+            db.execute(
+                "INSERT INTO coaches(telegram_id,created_at) VALUES(555,0)",
+                [],
+            )
+            .unwrap();
+        }
+        let uri = "/api/coach/trainings/901/coauthors";
+        assert_eq!(
+            send(app.clone(), "GET", uri, &signed, "").await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                uri,
+                &signed,
+                r#"{"telegram_id":314}"#
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                "/api/coach/trainings/902/coauthors",
+                &signed,
+                r#"{"telegram_id":555}"#
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (_, added) = send(
+            coach_app.clone(),
+            "POST",
+            uri,
+            &signed,
+            r#"{"username":"@othercoach"}"#,
+        )
+        .await;
+        assert_eq!(added["created"], true);
+        let (_, again) = send(
+            coach_app.clone(),
+            "POST",
+            uri,
+            &signed,
+            r#"{"telegram_id":555}"#,
+        )
+        .await;
+        assert_eq!(again["created"], false);
+        let (_, authors) = send(coach_app.clone(), "GET", uri, &signed, "").await;
+        assert_eq!(authors["coauthors"][0]["telegram_id"], 555);
+        let (_, removed) = send(
+            coach_app.clone(),
+            "DELETE",
+            "/api/coach/trainings/901/coauthors/555",
+            &signed,
+            "",
+        )
+        .await;
+        assert_eq!(removed["removed"], true);
         let batch = r#"{"period_start":"2099-01-01","period_end":"2099-01-07","weekdays":[0,2,4],"time":"19:00","training_type":"Batch","capacity":2}"#;
         let path = "/api/coach/trainings/batch";
         assert_eq!(

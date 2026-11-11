@@ -119,3 +119,122 @@ pub fn remove(
         != 0;
     Ok(json!({"ok":true,"removed":removed}))
 }
+
+fn training_authorize(
+    profiles: &Profiles,
+    db: &Connection,
+    init: &str,
+    now: i64,
+    id: i64,
+) -> Result<(i64, Option<i64>), ProfileError> {
+    let actor = crate::coach::coach(profiles, db, init, now)?;
+    let creator = db
+        .query_row(
+            "SELECT created_by FROM trainings WHERE id=?1 AND (deleted_at IS NULL OR deleted_at=0)",
+            [id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?
+        .ok_or(ProfileError::Rule(404, "Тренировка не найдена"))?;
+    Ok((actor, creator))
+}
+pub fn training_list(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    id: i64,
+) -> Result<Value, ProfileError> {
+    let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let (actor, creator) = training_authorize(profiles, &db, init, now, id)?;
+    let mut stmt=db.prepare("SELECT u.telegram_id,u.first_name,u.username,u.avatar_file_id FROM event_coauthors c JOIN users u ON u.telegram_id=c.user_id WHERE c.event_type='training' AND c.event_id=?1 ORDER BY c.created_at ASC").map_err(|_|ProfileError::Storage)?;
+    let rows = stmt
+        .query_map([id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|_| ProfileError::Storage)?;
+    let mut coauthors = Vec::new();
+    for row in rows {
+        let (id, name, username, file) = row.map_err(|_| ProfileError::Storage)?;
+        coauthors.push(json!({"telegram_id":id,"first_name":name.filter(|s|!s.is_empty()).unwrap_or_else(||"Тренер".into()),"username":username,"avatar_url":profiles.avatar_url(id,file.as_deref(),true,now)}));
+    }
+    Ok(json!({"ok":true,"can_manage":creator==Some(actor),"coauthors":coauthors}))
+}
+pub fn training_add(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    id: i64,
+    value: CoauthorInput,
+) -> Result<Value, ProfileError> {
+    if value
+        .username
+        .as_ref()
+        .is_some_and(|s| s.chars().count() > 64)
+    {
+        return Err(ProfileError::Invalid("Некорректный username."));
+    }
+    let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let (actor, creator) = training_authorize(profiles, &db, init, now, id)?;
+    if creator != Some(actor) {
+        return Err(ProfileError::Rule(
+            403,
+            "Добавлять соавторов может только создатель.",
+        ));
+    }
+    let target = if let Some(target) = value.telegram_id {
+        Some(target)
+    } else if let Some(name) = value.username {
+        db.query_row(
+            "SELECT telegram_id FROM users WHERE username=?1 COLLATE NOCASE",
+            [name.trim_start_matches('@')],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?
+    } else {
+        None
+    };
+    let target = target.ok_or(ProfileError::Rule(404, "Тренер не найден."))?;
+    if creator == Some(target) {
+        return Err(ProfileError::Rule(400, "Создатель уже управляет занятием."));
+    }
+    let is_coach: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM coaches WHERE telegram_id=?1)",
+            [target],
+            |r| r.get(0),
+        )
+        .map_err(|_| ProfileError::Storage)?;
+    if !is_coach {
+        return Err(ProfileError::Rule(
+            400,
+            "Соавтором тренировки может быть только тренер.",
+        ));
+    }
+    let created=db.execute("INSERT OR IGNORE INTO event_coauthors(event_type,event_id,user_id,added_by,created_at) VALUES('training',?1,?2,?3,?4)",params![id,target,actor,now]).map_err(|_|ProfileError::Storage)?!=0;
+    Ok(json!({"ok":true,"created":created,"telegram_id":target}))
+}
+pub fn training_remove(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    id: i64,
+    target: i64,
+) -> Result<Value, ProfileError> {
+    let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let (actor, creator) = training_authorize(profiles, &db, init, now, id)?;
+    if creator != Some(actor) {
+        return Err(ProfileError::Rule(
+            403,
+            "Снимать соавторов может только создатель.",
+        ));
+    }
+    let removed=db.execute("DELETE FROM event_coauthors WHERE event_type='training' AND event_id=?1 AND user_id=?2",params![id,target]).map_err(|_|ProfileError::Storage)?!=0;
+    Ok(json!({"ok":true,"removed":removed}))
+}
