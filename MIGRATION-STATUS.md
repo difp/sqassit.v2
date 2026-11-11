@@ -59,13 +59,17 @@ A fifteenth opt-in test compares match creation and feed publication: the creato
 
 A sixteenth opt-in test compares match-feed refresh: a stale feed is edited, an unchanged feed is left alone, a disabled recipient's feed is deleted, and once all matches are past the remaining feeds are removed.
 
+A seventeenth opt-in test compares `search_norm` with Python across every Unicode scalar value plus curated vectors for Cyrillic `ё`, German `ß`, Greek sigma, Turkish dotted/dotless i, ligatures, fullwidth forms, combining marks and emoji. It found 129 codepoints added after Unicode 9.0 that the bundled `unicode-casefold 0.2` tables did not fold; Rust now applies those mappings explicitly and the exhaustive comparison passes. It also checks the registered SQLite function for `NULL` and folded text.
+
+Another opt-in test requests every one of the reference's 75 HTTP routes without initData. It reads the route decorators and derives a minimal valid JSON body from the Python OpenAPI schema, so the comparison reaches authorization instead of failing in body parsing. Every protected route returns the same 401 detail, while pages, health/readiness, calendar, avatar, public-profile and webhook routes match Python's status and JSON. It caught no Rust differences after body generation; a route missing from the Rust router would surface as a 404/401 mismatch.
+
 Another cross-language test compares new and synthetic old databases after migration: table columns, index metadata and columns, selected data/backfills, and a repeated Rust migration. It does not replace testing against an anonymized copy of the actual production database or a backup/restore rehearsal.
 
 ## Still required
 
 This is **not yet a verified replacement**. All 75 reference HTTP routes are wired and the existing templates/static assets are served, but remaining release gates are:
 
-- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and mixed-kind cleanup ordering is not compared; the training edit comparison normalizes Python's repeated no-op edits and edit-time manager alerts.
+- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; every route is checked without authentication, but authenticated player/coach/manager role coverage is representative rather than every route/role pair, and mixed-kind cleanup ordering is not compared; the training edit comparison normalizes Python's repeated no-op edits and edit-time manager alerts.
 - Real Telegram polling, webhook registration, notifications, reminders and restart/concurrency behavior remain unverified; delivery is best-effort and can duplicate after a side effect fails.
 - A local Chromium run with signed dev init data rendered the player page, schedule and profile, completed booking and cancellation, and loaded the match and coach pages; Telegram WebView-specific behavior, real avatar files, ICS and CSP still need end-to-end checks with a test bot. Synthetic local benchmarks cover 50,000-player search and a 2,000-training/12,000-booking schedule, but there is no production load or database-size measurement.
 - A local smoke test rehearses an online SQLite backup and a restart from the copy with a signed-in profile marker. A rollback rehearsal lets the Python reference open the Rust-migrated database, read and overwrite the marker and add a training, after which Rust reads both changes back. Deployment on the target platform has not been rehearsed, and the Xray/VLESS scripts remain Python-only.
