@@ -22,6 +22,7 @@ pub struct WebState {
     pub bot: Option<crate::updates::BotRuntime>,
     pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
     pub messages: Option<crate::messages::Messages>,
+    pub match_api: crate::match_api::MatchApi,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -494,6 +495,50 @@ async fn api_book(
     })
     .await
 }
+async fn match_join(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| {
+        api.attendance(&p, &i, n, id, crate::match_api::Action::Join)
+    })
+    .await
+}
+async fn match_leave(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| {
+        api.attendance(&p, &i, n, id, crate::match_api::Action::Leave)
+    })
+    .await
+}
+async fn match_approve(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((id, user)): Path<(i64, i64)>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| {
+        api.attendance(&p, &i, n, id, crate::match_api::Action::Approve(user))
+    })
+    .await
+}
+async fn match_reject(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((id, user)): Path<(i64, i64)>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| {
+        api.attendance(&p, &i, n, id, crate::match_api::Action::Reject(user))
+    })
+    .await
+}
 async fn api_cancel(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -735,6 +780,16 @@ pub fn router(
         .route("/api/avatar/{id}", get(avatar_legacy))
         .route("/api/avatar/{id}/{version}", get(avatar_versioned))
         .route("/api/trainings", get(api_trainings))
+        .route("/api/matches/{id}/join", post(match_join))
+        .route("/api/matches/{id}/leave", post(match_leave))
+        .route(
+            "/api/matches/{id}/requests/{user}/approve",
+            post(match_approve),
+        )
+        .route(
+            "/api/matches/{id}/requests/{user}/reject",
+            post(match_reject),
+        )
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
         .route("/api/coach/pending", get(coach_pending))
@@ -787,12 +842,129 @@ pub fn router(
             bot,
             avatar,
             messages,
+            match_api: crate::match_api::MatchApi::default(),
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn match_attendance_requires_manager_and_promotes_waitlist() {
+        use axum::body::{to_bytes, Body};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use tower::ServiceExt;
+        fn signed(id: i64) -> String {
+            let timestamp = now().to_string();
+            let user = format!(r#"{{"id":{id},"first_name":"Player"}}"#);
+            let data = format!("auth_date={timestamp}\nuser={user}");
+            let mut mac = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+            mac.update(b"test-token");
+            let mut mac = Hmac::<Sha256>::new_from_slice(&mac.finalize().into_bytes()).unwrap();
+            mac.update(data.as_bytes());
+            form_urlencoded::Serializer::new(String::new())
+                .append_pair("auth_date", &timestamp)
+                .append_pair("user", &user)
+                .append_pair("hash", &hex::encode(mac.finalize().into_bytes()))
+                .finish()
+        }
+        async fn request(app: Router, uri: &str, token: &str) -> (StatusCode, serde_json::Value) {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-init-data", token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 65536).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute(
+            "INSERT INTO matches(id,start_at,max_players,created_by,created_at) VALUES(1,?1,1,1,0)",
+            [now() + 3600],
+        )
+        .unwrap();
+        db.execute("INSERT INTO event_coauthors(event_type,event_id,user_id,created_at) VALUES('match',1,4,0)",[]).unwrap();
+        let profiles = crate::profile::Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "test-token".into(),
+            owner: 1,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: true,
+            phone_required_from: None,
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
+        };
+        let app = router(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
+            false,
+            Some(profiles),
+            None,
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/join", "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        for id in [2, 3] {
+            assert_eq!(
+                request(app.clone(), "/api/matches/1/join", &signed(id))
+                    .await
+                    .1["status"],
+                "pending"
+            );
+        }
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/requests/2/approve", &signed(3))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/requests/2/approve", &signed(1))
+                .await
+                .1["status"],
+            "booked"
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/requests/3/approve", &signed(4))
+                .await
+                .1["status"],
+            "waitlist"
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/leave", &signed(2))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/join", &signed(3))
+                .await
+                .1["status"],
+            "booked"
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/requests/3/reject", &signed(1))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/leave", &signed(2))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
     #[test]
     fn original_templates_render_with_expected_dev_flag() {
         for name in ["index.html", "coach.html", "match.html"] {
@@ -1440,6 +1612,7 @@ mod tests {
             profiles: Some(profiles.clone()),
             bot: None,
             messages: None,
+            match_api: crate::match_api::MatchApi::default(),
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
