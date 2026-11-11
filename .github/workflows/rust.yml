@@ -25,6 +25,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r legacy/requirements.txt httpx2==2.14.0
+      - run: cargo build --release --locked
+      - run: python3 tests/rollback_smoke.py target/release/sqassit
+        env:
+          SQASSIT_REFERENCE_PYTHON: python
       - run: cargo test --locked --test python_contract --test schema_contract --test bot_contract --test reminder_contract --test cleanup_contract --test final_enrollment_contract --test match_notify_contract --test chat_notify_contract --test headers_contract --test training_delete_contract --test application_notify_contract --test role_notify_contract --test training_edit_contract --test training_booking_contract --test training_coach_contract --test match_create_contract --test match_feed_contract -- --ignored
         env:
           SQASSIT_REFERENCE_PYTHON: python
