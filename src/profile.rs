@@ -13,6 +13,9 @@ pub struct Profiles {
     pub bot_token: String,
     pub owner: i64,
     pub timezone: chrono_tz::Tz,
+    pub require_event_approval: bool,
+    pub phone_required_from: Option<i64>,
+    pub booking_limiter: Arc<Mutex<crate::rate_limit::RateLimiter>>,
 }
 
 #[derive(Debug)]
@@ -20,6 +23,8 @@ pub enum ProfileError {
     Unauthorized(&'static str),
     Storage,
     Invalid(&'static str),
+    Rule(u16, &'static str),
+    RateLimited(u64),
 }
 
 #[derive(Default, Deserialize)]

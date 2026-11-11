@@ -1,5 +1,30 @@
 //! Development-only server: deliberately reports not ready until migration completes.
+use chrono::TimeZone;
 use std::{env, net::SocketAddr, path::PathBuf};
+
+fn phone_cutoff(
+    raw: &str,
+    timezone: chrono_tz::Tz,
+) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(value.timestamp()));
+    }
+    let naive = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
+        .or_else(|_| {
+            chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).expect("valid midnight"))
+        })?;
+    let value = timezone
+        .from_local_datetime(&naive)
+        .earliest()
+        .ok_or("PHONE_REQUIRED_FROM is an invalid local time")?;
+    Ok(Some(value.timestamp()))
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,6 +40,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = match (env::var("BOT_TOKEN"), env::var("COACH_TELEGRAM_ID")) {
         (Ok(token), Ok(owner)) if !token.trim().is_empty() => {
             let owner: i64 = owner.trim().parse()?;
+            let timezone: chrono_tz::Tz = env::var("TIMEZONE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Europe/Moscow".to_owned())
+                .trim()
+                .parse()?;
+            let cutoff = phone_cutoff(
+                &env::var("PHONE_REQUIRED_FROM").unwrap_or_default(),
+                timezone,
+            )?;
+            let approval = env::var("REQUIRE_EVENT_APPROVAL")
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
             let path = PathBuf::from(
                 env::var("DB_PATH").unwrap_or_else(|_| "./data/squash.db".to_owned()),
             );
@@ -26,9 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db: std::sync::Arc::new(std::sync::Mutex::new(db)),
                 bot_token: token.trim().to_owned(),
                 owner,
-                timezone: env::var("TIMEZONE")
-                    .unwrap_or_else(|_| "Europe/Moscow".to_owned())
-                    .parse()?,
+                timezone,
+                require_event_approval: matches!(approval.as_str(), "1" | "true" | "yes" | "on"),
+                phone_required_from: cutoff,
+                booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                    sqassit::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+                )),
             })
         }
         (Err(_), Err(_)) => None,

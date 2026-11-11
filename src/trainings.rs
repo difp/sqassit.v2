@@ -137,6 +137,126 @@ pub fn list(
     Ok(json!({"ok":true,"trainings":trainings}))
 }
 
+fn authorize_booking(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+) -> Result<(i64, Value), ProfileError> {
+    let (id, user) = profiles.user_id(init, now)?;
+    profiles
+        .booking_limiter
+        .lock()
+        .map_err(|_| ProfileError::Storage)?
+        .check(&id.to_string())
+        .map_err(ProfileError::RateLimited)?;
+    Ok((id, user))
+}
+/// Preliminary preview: delivery of Telegram notifications is not implemented yet.
+pub fn book(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    training_id: i64,
+) -> Result<Value, ProfileError> {
+    let (id, user) = authorize_booking(profiles, init, now)?;
+    let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    profiles.register(&db, id, &user, now)?;
+    let training: Option<(i64, i64, Option<i64>)> = db
+        .query_row(
+            "SELECT start_at,capacity,deleted_at FROM trainings WHERE id=?1",
+            [training_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?;
+    let (start, capacity, deleted) =
+        training.ok_or(ProfileError::Rule(404, "Тренировка не найдена"))?;
+    if deleted.unwrap_or(0) != 0 {
+        return Err(ProfileError::Rule(404, "Тренировка не найдена"));
+    }
+    if start <= now {
+        return Err(ProfileError::Rule(400, "Тренировка уже началась"));
+    }
+    if profiles.phone_required_from.is_some_and(|date| now >= date) {
+        let phone: String = db
+            .query_row("SELECT phone FROM users WHERE telegram_id=?1", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|_| ProfileError::Storage)?;
+        if phone.is_empty() {
+            return Err(ProfileError::Rule(
+                403,
+                "Укажите телефон в настройках профиля, чтобы записаться.",
+            ));
+        }
+    }
+    let status = crate::booking::book(
+        &mut db,
+        training_id,
+        id,
+        capacity,
+        profiles.require_event_approval,
+        false,
+        now,
+    )
+    .map_err(|_| ProfileError::Storage)?;
+    let message = match status.as_str() {
+        "pending" => "Заявка отправлена тренеру.",
+        "booked" => "Вы записаны!",
+        _ => "Мест нет — вы в листе ожидания.",
+    };
+    Ok(json!({"ok":true,"status":status,"message":message}))
+}
+/// Cancellation and FIFO promotion; Telegram notification delivery remains to be migrated.
+pub fn cancel(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    training_id: i64,
+) -> Result<Value, ProfileError> {
+    let (id, user) = authorize_booking(profiles, init, now)?;
+    let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    profiles.register(&db, id, &user, now)?;
+    let training: Option<(i64, Option<i64>)> = db
+        .query_row(
+            "SELECT start_at,deleted_at FROM trainings WHERE id=?1",
+            [training_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?;
+    let (start, deleted) = training.ok_or(ProfileError::Rule(404, "Тренировка не найдена"))?;
+    if deleted.unwrap_or(0) != 0 {
+        return Err(ProfileError::Rule(404, "Тренировка не найдена"));
+    }
+    let status: Option<String> = db
+        .query_row(
+            "SELECT status FROM bookings WHERE training_id=?1 AND user_id=?2",
+            params![training_id, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| ProfileError::Storage)?;
+    if !matches!(status.as_deref(), Some("pending" | "booked" | "waitlist")) {
+        return Err(ProfileError::Rule(400, "Вы не записаны на эту тренировку"));
+    }
+    if start <= now {
+        return Err(ProfileError::Rule(
+            403,
+            "Тренировка уже началась — отмена недоступна.",
+        ));
+    }
+    if start - now < 270 * 60 {
+        return Err(ProfileError::Rule(
+            403,
+            "Отмена недоступна: до старта меньше 4.5 часов. Свяжитесь с тренером.",
+        ));
+    }
+    let promoted =
+        crate::booking::cancel(&mut db, training_id, id).map_err(|_| ProfileError::Storage)?;
+    Ok(json!({"ok":true,"promoted":promoted.map(|id|id.to_string())}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +267,42 @@ mod tests {
         assert_eq!(end_of_window(1_774_661_400, 1, tz).unwrap(), 1_774_747_800);
         assert_eq!(end_of_window(1_792_801_800, 1, tz).unwrap(), 1_792_888_200);
         assert_eq!(end_of_window(1_774_695_600, 1, tz).unwrap(), 1_774_778_400);
+    }
+    #[test]
+    fn phone_cutoff_and_approval_are_enforced() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute(
+            "INSERT INTO trainings(id,title,start_at,created_at) VALUES (7,'Test',2000000,0)",
+            [],
+        )
+        .unwrap();
+        let profiles = Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "123456:TEST-TOKEN".into(),
+            owner: 123,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: true,
+            phone_required_from: Some(1_000_000),
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
+        };
+        let signed = "auth_date=1000000&query_id=AA&user=%7B%22id%22%3A42%2C%22first_name%22%3A%22%5Cu0418%5Cu0432%5Cu0430%5Cu043d%22%7D&signature=telegram-signature&hash=aad77d89362a2d2634adf06dc7e3e3ac1d2043c386ebe89bc420769fcd8ef362";
+        assert!(matches!(
+            book(&profiles, signed, 1_000_000, 7),
+            Err(ProfileError::Rule(403, _))
+        ));
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET phone='+79991234567' WHERE telegram_id=42",
+                [],
+            )
+            .unwrap();
+        let result = book(&profiles, signed, 1_000_000, 7).unwrap();
+        assert_eq!(result["status"], "pending");
     }
 }

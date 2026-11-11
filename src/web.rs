@@ -1,6 +1,6 @@
 //! Experimental HTTP shell for the migrated UI. The API and bot are unfinished.
 use axum::{
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -117,6 +117,17 @@ where
         Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
             (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
         }
+        Ok(Err(crate::profile::ProfileError::Rule(status, message))) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"ok":false,"error":message})),
+        )
+            .into_response(),
+        Ok(Err(crate::profile::ProfileError::RateLimited(seconds))) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, seconds.to_string())],
+            Json(json!({"detail":"Слишком много запросов. Попробуйте позже."})),
+        )
+            .into_response(),
         Ok(Err(crate::profile::ProfileError::Invalid(message))) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"ok":false,"error":message})),
@@ -173,6 +184,26 @@ async fn api_trainings(
     })
     .await
 }
+async fn api_book(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::trainings::book(&p, &i, n, id)
+    })
+    .await
+}
+async fn api_cancel(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::trainings::cancel(&p, &i, n, id)
+    })
+    .await
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -209,6 +240,8 @@ pub fn router(
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
         .route("/api/trainings", get(api_trainings))
+        .route("/api/trainings/{id}/book", post(api_book))
+        .route("/api/trainings/{id}/cancel", post(api_cancel))
         .route("/api/me/onboarding", post(api_onboarding))
         .route("/api/me/profile", put(api_update_profile))
         .route("/api/me/notifications", put(api_notifications))
@@ -292,11 +325,21 @@ mod tests {
             [],
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO trainings(id,title,start_at,created_at) VALUES (8,'Утренняя',?1,0)",
+            [now() + 6 * 3600],
+        )
+        .unwrap();
         let profiles = crate::profile::Profiles {
             db: std::sync::Arc::new(std::sync::Mutex::new(db)),
             bot_token: "123456:TEST-TOKEN".into(),
             owner: 123,
             timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
         };
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
@@ -398,6 +441,38 @@ mod tests {
         assert_ne!(person["first_name"], "Секретное имя");
         assert_eq!(person["avatar_url"], "");
         assert!(person.get("telegram_id").is_none());
+        let (status, booking) =
+            send(app.clone(), "POST", "/api/trainings/7/book", &signed, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(booking["status"], "booked");
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/7/cancel", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/8/book", &signed, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (status, cancelled) =
+            send(app.clone(), "POST", "/api/trainings/8/cancel", &signed, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["promoted"], serde_json::Value::Null);
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/8/cancel", &signed, "")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/999/book", &signed, "")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(
             send(app, "GET", "/api/me", &signed.replace("42", "43"), "")
                 .await
