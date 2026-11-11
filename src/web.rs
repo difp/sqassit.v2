@@ -1614,6 +1614,7 @@ async fn telegram_webhook(
             mode: bot.mode,
             secret: &bot.secret,
             base_url: &bot.base_url,
+            notifier: &bot.notifier,
         },
         received,
         &update,

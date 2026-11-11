@@ -45,6 +45,7 @@ pub struct WebhookConfig<'a> {
     pub mode: BotMode,
     pub secret: &'a str,
     pub base_url: &'a str,
+    pub notifier: &'a crate::event_notify::EventNotifier,
 }
 /// Returns HTTP status and JSON. Never accepts an update in polling mode or with an invalid secret.
 pub async fn webhook<T: BotTransport>(
@@ -61,7 +62,7 @@ pub async fn webhook<T: BotTransport>(
     if !verify_secret(config.secret, received) {
         return (403, json!({"ok":false,"error":"Forbidden"}));
     }
-    match bot::handle_update(profiles, bot, config.base_url, update, now).await {
+    match bot::handle_update(profiles, bot, config.base_url, config.notifier, update, now).await {
         Ok(()) | Err(BotError::Unsupported) => (200, json!({"ok":true})),
         Err(BotError::Database | BotError::Telegram) => (503, json!({"ok":false})),
         Err(BotError::Malformed) => (400, json!({"ok":false})),
@@ -72,6 +73,7 @@ async fn process_batch<T: BotTransport>(
     profiles: &Profiles,
     bot: &T,
     base: &str,
+    notifier: &crate::event_notify::EventNotifier,
     items: &[Value],
     mut offset: i64,
     now: i64,
@@ -80,7 +82,7 @@ async fn process_batch<T: BotTransport>(
         let Some(id) = update.get("update_id").and_then(Value::as_i64) else {
             return Err(offset);
         };
-        match bot::handle_update(profiles, bot, base, update, now).await {
+        match bot::handle_update(profiles, bot, base, notifier, update, now).await {
             Ok(()) | Err(BotError::Unsupported) => {}
             Err(_) => return Err(offset),
         }
@@ -103,6 +105,7 @@ pub async fn poll(runtime: BotRuntime) {
                     &runtime.profiles,
                     &runtime.client,
                     &runtime.base_url,
+                    &runtime.notifier,
                     items,
                     offset,
                     now,
@@ -170,7 +173,8 @@ mod tests {
                 WebhookConfig {
                     mode: BotMode::Polling,
                     secret,
-                    base_url: ""
+                    base_url: "",
+                    notifier: &crate::event_notify::EventNotifier::default()
                 },
                 secret,
                 &update,
@@ -187,7 +191,8 @@ mod tests {
                 WebhookConfig {
                     mode: BotMode::Webhook,
                     secret,
-                    base_url: ""
+                    base_url: "",
+                    notifier: &crate::event_notify::EventNotifier::default()
                 },
                 "wrong",
                 &update,
@@ -205,7 +210,8 @@ mod tests {
                 WebhookConfig {
                     mode: BotMode::Webhook,
                     secret,
-                    base_url: ""
+                    base_url: "",
+                    notifier: &crate::event_notify::EventNotifier::default()
                 },
                 secret,
                 &update,
@@ -224,7 +230,8 @@ mod tests {
                 WebhookConfig {
                     mode: BotMode::Webhook,
                     secret,
-                    base_url: ""
+                    base_url: "",
+                    notifier: &crate::event_notify::EventNotifier::default()
                 },
                 secret,
                 &unknown,
@@ -244,7 +251,19 @@ mod tests {
             json!({"update_id":11,"callback_query":{"id":"x","from":{"id":42},"data":"future:action"}}),
             json!({"update_id":12,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}}),
         ];
-        assert_eq!(process_batch(&p, &bot, "", &messages, 0, 1).await, Ok(13));
+        assert_eq!(
+            process_batch(
+                &p,
+                &bot,
+                "",
+                &crate::event_notify::EventNotifier::default(),
+                &messages,
+                0,
+                1
+            )
+            .await,
+            Ok(13)
+        );
         assert_eq!(*bot.0.lock().unwrap(), 2);
     }
     #[tokio::test]
@@ -264,7 +283,19 @@ mod tests {
         let p = service();
         let bot = Failing(Mutex::new(0));
         let messages = (10..13).map(|id| json!({"update_id":id,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}})).collect::<Vec<_>>();
-        assert_eq!(process_batch(&p, &bot, "", &messages, 0, 1).await, Err(11));
+        assert_eq!(
+            process_batch(
+                &p,
+                &bot,
+                "",
+                &crate::event_notify::EventNotifier::default(),
+                &messages,
+                0,
+                1
+            )
+            .await,
+            Err(11)
+        );
         assert_eq!(*bot.0.lock().unwrap(), 2);
     }
 }

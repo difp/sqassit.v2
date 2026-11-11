@@ -262,13 +262,19 @@ fn attendees_text(profiles: &Profiles, id: i64, user: i64) -> Result<Option<Stri
     }
     Ok(Some(out))
 }
+struct SlotChange {
+    message: &'static str,
+    status: String,
+    promoted: Option<i64>,
+}
+
 fn change(
     profiles: &Profiles,
     id: i64,
     user: i64,
     now: i64,
     book: bool,
-) -> Result<Result<String, &'static str>, BotError> {
+) -> Result<Result<SlotChange, &'static str>, BotError> {
     let mut db = profiles.db.lock().map_err(|_| BotError::Database)?;
     let Some(slot) = get_slot(&db, id)? else {
         return Ok(Err("Тренировка не найдена"));
@@ -300,12 +306,16 @@ fn change(
             now,
         )
         .map_err(|_| BotError::Database)?;
-        Ok(Ok(match status.as_str() {
+        let message = match status.as_str() {
             "pending" => "Заявка отправлена тренеру",
             "booked" => "Вы записаны",
             _ => "Вы в листе ожидания",
-        }
-        .to_owned()))
+        };
+        Ok(Ok(SlotChange {
+            message,
+            status,
+            promoted: None,
+        }))
     } else {
         if slot.start - now < 270 * 60 {
             return Ok(Err("Отмена недоступна: до старта меньше 4.5 часов"));
@@ -321,8 +331,12 @@ fn change(
         if !matches!(status.as_deref(), Some("pending" | "booked" | "waitlist")) {
             return Ok(Err("Вы не записаны на эту тренировку"));
         }
-        booking::cancel(&mut db, id, user).map_err(|_| BotError::Database)?;
-        Ok(Ok("Запись отменена".into()))
+        let promoted = booking::cancel(&mut db, id, user).map_err(|_| BotError::Database)?;
+        Ok(Ok(SlotChange {
+            message: "Запись отменена",
+            status: "cancelled".into(),
+            promoted,
+        }))
     }
 }
 async fn application<T: BotTransport>(
@@ -449,6 +463,8 @@ async fn application<T: BotTransport>(
 pub async fn handle_callback<T: BotTransport>(
     profiles: &Profiles,
     bot: &T,
+    notifier: &crate::event_notify::EventNotifier,
+    base: &str,
     callback: &Value,
     now: i64,
 ) -> Result<(), BotError> {
@@ -490,8 +506,38 @@ pub async fn handle_callback<T: BotTransport>(
             Err(message) => {
                 answer(bot, cb, message, true).await?;
             }
-            Ok(message) => {
-                answer(bot, cb, &message, false).await?;
+            Ok(change) => {
+                let event = crate::training_notify::TrainingChange {
+                    training: id,
+                    user,
+                    status: &change.status,
+                    actor: Some(user),
+                    base,
+                    now,
+                };
+                if crate::training_notify::notify(profiles, bot, notifier, event)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Training notification delivery failed");
+                }
+                if let Some(promoted) = change.promoted {
+                    let event = crate::training_notify::TrainingChange {
+                        training: id,
+                        user: promoted,
+                        status: "promoted",
+                        actor: None,
+                        base,
+                        now,
+                    };
+                    if crate::training_notify::notify(profiles, bot, notifier, event)
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("Training promotion notification delivery failed");
+                    }
+                }
+                answer(bot, cb, change.message, false).await?;
                 if let (Some(chat), Some(message_id), Some((text, markup))) = (
                     chat,
                     callback

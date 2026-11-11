@@ -106,11 +106,13 @@ pub async fn handle_update<T: BotTransport>(
     profiles: &Profiles,
     bot: &T,
     base_url: &str,
+    notifier: &crate::event_notify::EventNotifier,
     update: &Value,
     now: i64,
 ) -> Result<(), BotError> {
     if let Some(callback) = update.get("callback_query") {
-        return crate::bot_slots::handle_callback(profiles, bot, callback, now).await;
+        return crate::bot_slots::handle_callback(profiles, bot, notifier, base_url, callback, now)
+            .await;
     }
     let message = update.get("message").ok_or(BotError::Unsupported)?;
     let from = message.get("from").ok_or(BotError::Malformed)?;
@@ -276,12 +278,26 @@ mod tests {
         let profiles = profiles();
         let bot = Fake::default();
         let start = json!({"message":{"from":{"id":42,"first_name":"<Иван>"},"chat":{"id":42},"text":"/start"}});
-        handle_update(&profiles, &bot, "https://example.com", &start, 1000)
-            .await
-            .unwrap();
-        handle_update(&profiles, &bot, "https://example.com", &start, 1001)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "https://example.com",
+            &crate::event_notify::EventNotifier::default(),
+            &start,
+            1000,
+        )
+        .await
+        .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "https://example.com",
+            &crate::event_notify::EventNotifier::default(),
+            &start,
+            1001,
+        )
+        .await
+        .unwrap();
         {
             let calls = bot.calls.lock().unwrap();
             assert_eq!(
@@ -300,9 +316,16 @@ mod tests {
                 == Some("https://example.com?v=46")));
         }
         let other = json!({"message":{"from":{"id":42},"chat":{"id":42},"contact":{"user_id":99,"phone_number":"79991234567"}}});
-        handle_update(&profiles, &bot, "", &other, 1002)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &other,
+            1002,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             profiles
                 .db
@@ -315,9 +338,16 @@ mod tests {
             ""
         );
         let own = json!({"message":{"from":{"id":42},"chat":{"id":42},"contact":{"user_id":42,"phone_number":"+7 (999) 123-45-67"}}});
-        handle_update(&profiles, &bot, "", &own, 1003)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &own,
+            1003,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             profiles
                 .db
@@ -330,9 +360,16 @@ mod tests {
             "+79991234567"
         );
         let slots = json!({"message":{"from":{"id":42},"chat":{"id":42},"text":"/slots"}});
-        handle_update(&profiles, &bot, "", &slots, 1004)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &slots,
+            1004,
+        )
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn unchanged_rules_do_not_create_duplicate_messages() {
@@ -369,6 +406,71 @@ mod tests {
         assert_eq!(text, RULES);
     }
     #[tokio::test]
+    async fn slot_callbacks_notify_booking_and_waitlist_promotion() {
+        let profiles = profiles();
+        let bot = Fake::default();
+        let notifier = crate::event_notify::EventNotifier::default();
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute_batch("INSERT INTO users(telegram_id,first_name,notify_trainings,created_at) VALUES(1,'First',1,0),(2,'Second',1,0); INSERT INTO trainings(id,title,training_type,start_at,capacity,created_at) VALUES(7,'x','Test',25000,1,0);").unwrap();
+        }
+        let callback = |user: i64, data: &str| json!({"callback_query":{"id":"cb","from":{"id":user},"data":data,"message":{"message_id":55,"chat":{"id":user}}}});
+        for (user, data) in [(1, "slots:book:7"), (2, "slots:book:7")] {
+            handle_update(
+                &profiles,
+                &bot,
+                "https://example.test",
+                &notifier,
+                &callback(user, data),
+                1000,
+            )
+            .await
+            .unwrap();
+        }
+        {
+            let db = profiles.db.lock().unwrap();
+            let count: i64 = db.query_row("SELECT COUNT(*) FROM event_notifications WHERE (kind='training_booked' AND chat_id=1) OR (kind='training_waitlist' AND chat_id=2)", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 2);
+        }
+        handle_update(
+            &profiles,
+            &bot,
+            "https://example.test",
+            &notifier,
+            &callback(1, "slots:cancel:7"),
+            1000,
+        )
+        .await
+        .unwrap();
+        {
+            let db = profiles.db.lock().unwrap();
+            let status: String = db
+                .query_row(
+                    "SELECT status FROM bookings WHERE training_id=7 AND user_id=2",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "booked");
+            let count: i64 = db.query_row("SELECT COUNT(*) FROM event_notifications WHERE kind='training_booked' AND chat_id=2", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 1);
+        }
+        let before = bot.calls.lock().unwrap().len();
+        handle_update(
+            &profiles,
+            &bot,
+            "https://example.test",
+            &notifier,
+            &callback(1, "slots:book:999"),
+            1000,
+        )
+        .await
+        .unwrap();
+        let calls = bot.calls.lock().unwrap();
+        assert_eq!(calls.len(), before + 1);
+        assert_eq!(calls.last().unwrap().0, "answerCallbackQuery");
+    }
+    #[tokio::test]
     async fn slot_callbacks_book_cancel_and_hide_private_details() {
         let profiles = profiles();
         let bot = Fake::default();
@@ -380,12 +482,26 @@ mod tests {
             db.execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(7,314,'booked',0)",[]).unwrap();
         }
         let callback = |data: &str| json!({"callback_query":{"id":"cb","from":{"id":42},"data":data,"message":{"message_id":55,"chat":{"id":42}}}});
-        handle_update(&profiles, &bot, "", &callback("slots:show:7"), 1000)
-            .await
-            .unwrap();
-        handle_update(&profiles, &bot, "", &callback("slots:book:7"), 1000)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &callback("slots:show:7"),
+            1000,
+        )
+        .await
+        .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &callback("slots:book:7"),
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             profiles
                 .db
@@ -399,9 +515,16 @@ mod tests {
                 .unwrap(),
             "booked"
         );
-        handle_update(&profiles, &bot, "", &callback("attendees:show:7"), 1000)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &callback("attendees:show:7"),
+            1000,
+        )
+        .await
+        .unwrap();
         {
             let calls = bot.calls.lock().unwrap();
             let text = calls
@@ -416,9 +539,16 @@ mod tests {
             assert!(!text.contains("secret_handle"));
             assert!(!text.contains("1234567890"));
         }
-        handle_update(&profiles, &bot, "", &callback("slots:cancel:7"), 1000)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &callback("slots:cancel:7"),
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             profiles
                 .db
@@ -441,9 +571,16 @@ mod tests {
             .unwrap();
             db.execute("INSERT INTO coach_applications(telegram_id,status,created_at) VALUES(99,'pending',0)",[]).unwrap();
         }
-        handle_update(&profiles, &bot, "", &callback("apply:ok:99"), 1000)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &callback("apply:ok:99"),
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             profiles
                 .db
@@ -458,9 +595,16 @@ mod tests {
             "pending"
         );
         let admin = json!({"callback_query":{"id":"cb2","from":{"id":123},"data":"apply:ok:99","message":{"chat":{"id":123}}}});
-        handle_update(&profiles, &bot, "", &admin, 1001)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &admin,
+            1001,
+        )
+        .await
+        .unwrap();
         {
             let db = profiles.db.lock().unwrap();
             assert_eq!(
@@ -479,8 +623,15 @@ mod tests {
                 1
             );
         }
-        handle_update(&profiles, &bot, "", &admin, 1002)
-            .await
-            .unwrap();
+        handle_update(
+            &profiles,
+            &bot,
+            "",
+            &crate::event_notify::EventNotifier::default(),
+            &admin,
+            1002,
+        )
+        .await
+        .unwrap();
     }
 }
