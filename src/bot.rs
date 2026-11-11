@@ -429,9 +429,55 @@ mod tests {
                 .unwrap(),
             "cancelled"
         );
-        assert!(matches!(
-            handle_update(&profiles, &bot, "", &callback("apply:ok:99"), 1000).await,
-            Err(BotError::Unsupported)
-        ));
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO users(telegram_id,first_name,created_at) VALUES(99,'Заявитель',0)",
+                [],
+            )
+            .unwrap();
+            db.execute("INSERT INTO coach_applications(telegram_id,status,created_at) VALUES(99,'pending',0)",[]).unwrap();
+        }
+        handle_update(&profiles, &bot, "", &callback("apply:ok:99"), 1000)
+            .await
+            .unwrap();
+        assert_eq!(
+            profiles
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM coach_applications WHERE telegram_id=99",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "pending"
+        );
+        let admin = json!({"callback_query":{"id":"cb2","from":{"id":123},"data":"apply:ok:99","message":{"chat":{"id":123}}}});
+        handle_update(&profiles, &bot, "", &admin, 1001)
+            .await
+            .unwrap();
+        {
+            let db = profiles.db.lock().unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM coach_applications WHERE telegram_id=99",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "approved"
+            );
+            assert_eq!(
+                db.query_row("SELECT is_coach FROM users WHERE telegram_id=99", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        handle_update(&profiles, &bot, "", &admin, 1002)
+            .await
+            .unwrap();
     }
 }

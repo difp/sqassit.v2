@@ -325,6 +325,127 @@ fn change(
         Ok(Ok("Запись отменена".into()))
     }
 }
+async fn application<T: BotTransport>(
+    profiles: &Profiles,
+    bot: &T,
+    callback: &Value,
+    now: i64,
+) -> Result<(), BotError> {
+    let cb = callback
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or(BotError::Malformed)?;
+    let actor = callback
+        .pointer("/from/id")
+        .and_then(Value::as_i64)
+        .ok_or(BotError::Malformed)?;
+    let data = callback
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or(BotError::Malformed)?;
+    let parts: Vec<_> = data.split(':').collect();
+    let allowed = {
+        let db = profiles.db.lock().map_err(|_| BotError::Database)?;
+        actor == profiles.owner
+            || db
+                .query_row(
+                    "SELECT is_manager FROM coaches WHERE telegram_id=?1",
+                    [actor],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()
+                .map_err(|_| BotError::Database)?
+                .unwrap_or(false)
+    };
+    if !allowed {
+        answer(bot, cb, "Недоступно", true).await?;
+        return Ok(());
+    }
+    if parts.len() != 3 || !matches!(parts[1], "ok" | "no") {
+        answer(bot, cb, "", false).await?;
+        return Ok(());
+    }
+    let applicant = parts[2].parse::<i64>().map_err(|_| BotError::Malformed)?;
+    let Some(chat) = callback.pointer("/message/chat/id").and_then(Value::as_i64) else {
+        answer(bot, cb, "Сообщение недоступно", true).await?;
+        return Ok(());
+    };
+    let approved = parts[1] == "ok";
+    let processed = {
+        let mut db = profiles.db.lock().map_err(|_| BotError::Database)?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| BotError::Database)?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM coach_applications WHERE telegram_id=?1",
+                [applicant],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| BotError::Database)?;
+        if status.as_deref() != Some("pending") {
+            false
+        } else {
+            if approved {
+                let inserted=tx.execute("INSERT OR IGNORE INTO coaches(telegram_id,added_by,created_at) VALUES(?1,?2,?3)",params![applicant,actor,now]).map_err(|_|BotError::Database)?;
+                if inserted > 0 {
+                    tx.execute(
+                        "UPDATE users SET is_coach=1 WHERE telegram_id=?1",
+                        [applicant],
+                    )
+                    .map_err(|_| BotError::Database)?;
+                }
+            }
+            tx.execute("UPDATE coach_applications SET status=?1,decided_by=?2,decided_at=?3 WHERE telegram_id=?4",params![if approved{"approved"}else{"rejected"},actor,now,applicant]).map_err(|_|BotError::Database)?;
+            tx.execute("UPDATE event_notifications SET delete_at=?1 WHERE kind='coach_application' AND entity_id=?2",params![now,applicant]).map_err(|_|BotError::Database)?;
+            tx.commit().map_err(|_| BotError::Database)?;
+            true
+        }
+    };
+    if !processed {
+        answer(bot, cb, "Заявка уже рассмотрена", true).await?;
+        return Ok(());
+    }
+    bot::send(
+        bot,
+        chat,
+        if approved {
+            "✅ Заявка одобрена"
+        } else {
+            "❌ Заявка отклонена"
+        },
+        None,
+    )
+    .await?;
+    answer(
+        bot,
+        cb,
+        if approved {
+            "Одобрено"
+        } else {
+            "Отклонено"
+        },
+        false,
+    )
+    .await?;
+    let text = if approved {
+        "🎉 Ваша заявка одобрена! Откройте приложение — появится вкладка «Тренер»."
+    } else {
+        "Ваша заявка на тренера отклонена."
+    };
+    if let Ok(sent) = bot::send(bot, applicant, text, None).await {
+        if let Some(message_id) = sent
+            .pointer("/result/message_id")
+            .and_then(Value::as_i64)
+            .filter(|id| *id > 0)
+        {
+            let db = profiles.db.lock().map_err(|_| BotError::Database)?;
+            db.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at,sent_at) VALUES('notice',?1,?2,?2,?1,?3,?4,?5,?4) ON CONFLICT(kind,entity_id,chat_id,user_id) DO UPDATE SET message_id=excluded.message_id,text=excluded.text,updated_at=excluded.updated_at,delete_at=excluded.delete_at",params![message_id,applicant,text,now,now+86400]).map_err(|_|BotError::Database)?;
+        }
+    }
+    Ok(())
+}
 pub async fn handle_callback<T: BotTransport>(
     profiles: &Profiles,
     bot: &T,
@@ -343,6 +464,9 @@ pub async fn handle_callback<T: BotTransport>(
         .get("data")
         .and_then(Value::as_str)
         .ok_or(BotError::Unsupported)?;
+    if data.starts_with("apply:") {
+        return application(profiles, bot, callback, now).await;
+    }
     let chat = callback.pointer("/message/chat/id").and_then(Value::as_i64);
     if data == "slots:list" || data == "attendees:list" {
         answer(bot, cb, "", false).await?;
