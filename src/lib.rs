@@ -4,3 +4,4 @@
 pub mod auth;
 pub mod identity;
 pub mod rate_limit;
+pub mod storage;
