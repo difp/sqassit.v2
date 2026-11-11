@@ -31,7 +31,9 @@ An opt-in Python/Rust contract test runs 147 scenarios covering profile onboardi
 
 A second opt-in Python/Rust test drives the same Telegram updates through both bot implementations and compares outgoing API methods and payloads: `/start`, `/phone`, `/slots`, fallback text, own and foreign contacts, slot and attendee callbacks, and coach-application approve/reject decisions, including an unauthorized and an already-decided callback. It also compares the resulting users, notification rows, coaches and applications. Bot defaults and empty callback-answer fields are normalized, and fake message IDs advance identically. Booking/cancellation callbacks are excluded because their notification fan-out is best-effort and mutates many messages.
 
-A third opt-in test compares one due training-reminder tick: the reminder text and recipient call, `reminder_deliveries`, the stored `training_reminder` notification and the `reminder_sent` flag. Expired-message cleanup and retry after transport failures are not compared.
+A third opt-in test compares one due training-reminder tick: the reminder text and recipient call, `reminder_deliveries`, the stored `training_reminder` notification and the `reminder_sent` flag.
+
+A fourth opt-in test compares expired-notification cleanup for training cards, chats, matches, match feeds, coach applications, notices, reminders and training-status messages, including the preliminary row that keeps its record after its message is deleted. It also checks that a transient deletion failure leaves the row for the next tick. Final-enrollment replacement and mixed-kind ordering are not compared because the Rust cleanup loops run concurrently.
 
 Another cross-language test compares new and synthetic old databases after migration: table columns, index metadata and columns, selected data/backfills, and a repeated Rust migration. It does not replace testing against an anonymized copy of the actual production database or a backup/restore rehearsal.
 
@@ -39,7 +41,7 @@ Another cross-language test compares new and synthetic old databases after migra
 
 This is **not yet a verified replacement**. All 75 reference HTTP routes are wired and the existing templates/static assets are served, but remaining release gates are:
 
-- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out plus expired-message cleanup are not compared.
+- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out plus preliminary-to-final replacement are not compared.
 - Real Telegram polling, webhook registration, notifications, reminders and restart/concurrency behavior remain unverified; delivery is best-effort and can duplicate after a side effect fails.
 - Browser Mini App scenarios, ICS, Unicode, avatar download/ETag and CSP behavior need end-to-end checks against Telegram, and load/large-dataset performance is unmeasured.
 - Backup/restore, deployment on the target platform and rollback have not been rehearsed; the Xray/VLESS scripts remain Python-only.
