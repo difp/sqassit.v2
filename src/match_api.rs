@@ -1,4 +1,4 @@
-//! Match attendance API, excluding Telegram notifications which are not migrated yet.
+//! Match attendance API; best-effort notifications are sent by the HTTP layer.
 use crate::{
     match_booking,
     profile::{ProfileError, Profiles},
@@ -90,7 +90,7 @@ impl MatchApi {
         tx.commit().map_err(|_| ProfileError::Storage)?;
         Ok(json!({"ok":true,"code":code}))
     }
-    /// Soft-delete is reserved for the organizer. Event notifications are not yet migrated.
+    /// Soft-delete is reserved for the organizer; callers send notifications.
     pub fn delete(
         &self,
         profiles: &Profiles,

@@ -1,4 +1,4 @@
-//! Incremental Telegram update handlers. Receiving updates is not enabled yet.
+//! Incremental Telegram update handlers used by the opt-in receive loop.
 use crate::{
     profile::Profiles,
     telegram::{BotTransport, TelegramError},

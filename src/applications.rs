@@ -1,4 +1,4 @@
-//! Coach application workflows. Telegram notifications are not yet connected.
+//! Coach application workflows; Telegram notices are sent by the HTTP layer.
 use crate::{
     auth, coach_registry, identity,
     profile::{ProfileError, Profiles},

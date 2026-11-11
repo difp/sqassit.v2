@@ -1,4 +1,4 @@
-//! Coach-owned training management. Notifications are not implemented yet.
+//! Coach-owned training management; best-effort notifications are sent by callers.
 use crate::profile::{ProfileError, Profiles};
 use chrono::{Datelike, LocalResult, Offset, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
