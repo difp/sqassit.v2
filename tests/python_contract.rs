@@ -28,13 +28,21 @@ fn signed(id: i64, name: &str, now: i64) -> String {
         .append_pair("hash", &hex::encode(signature.finalize().into_bytes()))
         .finish()
 }
-fn normalize(value: &mut Value) {
+fn normalize(value: &mut Value, test_start: i64) {
     match value {
-        Value::Array(values) => values.iter_mut().for_each(normalize),
+        Value::Array(values) => values.iter_mut().for_each(|v| normalize(v, test_start)),
         Value::Object(map) => {
             for (key, item) in map.iter_mut() {
                 match key.as_str() {
                     "seconds_left" => *item = json!("<clock>"),
+                    "joined_at" | "created_at" | "last_at" => {
+                        let joined = item.as_i64().expect("joined_at is an integer timestamp");
+                        assert!(
+                            (joined - test_start).abs() <= 60,
+                            "joined_at is not near test time"
+                        );
+                        *item = json!("<clock>");
+                    }
                     "ics_token" | "profile_token" => *item = json!("<scoped-token>"),
                     "avatar_url" => {
                         if let Some(url) = item.as_str() {
@@ -43,7 +51,7 @@ fn normalize(value: &mut Value) {
                             }
                         }
                     }
-                    _ => normalize(item),
+                    _ => normalize(item, test_start),
                 }
             }
         }
@@ -114,6 +122,10 @@ async fn same_profile_and_training_workflow_as_python() {
         ("POST", "/api/me/onboarding", 42, None),
         ("GET", "/api/me", 42, None),
         ("GET", "/api/levels", 42, None),
+        ("GET", "/api/coach/players", 42, None),
+        ("POST", "/api/trainings/999/book", 42, None),
+        ("POST", "/api/trainings/999/cancel", 42, None),
+        ("POST", "/api/matches/999/join", 42, None),
         (
             "POST",
             "/api/coach/trainings",
@@ -121,6 +133,8 @@ async fn same_profile_and_training_workflow_as_python() {
             Some(json!({"date":date,"time":"12:00","training_type":"Squash","capacity":1})),
         ),
         ("GET", "/api/trainings?days=7", 42, None),
+        ("POST", "/api/trainings/1/room", 42, None),
+        ("POST", "/api/trainings/1/cancel", 42, None),
         ("POST", "/api/trainings/1/book", 42, None),
         ("GET", "/api/trainings?days=7", 42, None),
         ("POST", "/api/trainings/1/book", 43, None),
@@ -133,10 +147,30 @@ async fn same_profile_and_training_workflow_as_python() {
             42,
             Some(json!({"date":date,"time":"13:00","title":"Match"})),
         ),
+        ("POST", "/api/matches/1/room", 43, None),
+        ("DELETE", "/api/matches/1", 43, None),
         ("POST", "/api/matches/1/join", 43, None),
         ("GET", "/api/matches", 43, None),
         ("POST", "/api/matches/1/leave", 43, None),
         ("DELETE", "/api/matches/1", 42, None),
+        ("POST", "/api/matches/1/join", 43, None),
+        (
+            "POST",
+            "/api/messages/coach",
+            42,
+            Some(json!({"text":"  Привет тренер  ","training_id":1})),
+        ),
+        ("GET", "/api/coach/messages", 123, None),
+        ("GET", "/api/coach/messages/42", 123, None),
+        (
+            "POST",
+            "/api/coach/messages/42",
+            123,
+            Some(json!({"text":"Здравствуйте"})),
+        ),
+        ("GET", "/api/messages/thread", 42, None),
+        ("GET", "/api/messages/thread", 43, None),
+        ("GET", "/api/coach/messages/42", 43, None),
         ("GET", "/api/coach/players", 123, None),
         ("PUT", "/api/coach/players/42/notes", 123, Some(json!({}))),
     ];
@@ -174,8 +208,8 @@ async fn same_profile_and_training_workflow_as_python() {
         let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let mut actual =
             json!({"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()});
-        normalize(&mut actual);
-        normalize(&mut reference);
+        normalize(&mut actual, now);
+        normalize(&mut reference, now);
         assert_eq!(actual, reference, "{method} {path}");
     }
 }
