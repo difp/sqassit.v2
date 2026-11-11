@@ -14,7 +14,7 @@ pub(crate) fn end_of_window(now: i64, days: i64, timezone: Tz) -> Result<i64, Pr
         .with_timezone(&timezone);
     let target = start
         .naive_local()
-        .checked_add_days(Days::new(days.clamp(1, 31) as u64))
+        .checked_add_days(Days::new(days as u64))
         .ok_or(ProfileError::Storage)?;
     let end = match timezone.from_local_datetime(&target) {
         LocalResult::Single(t) | LocalResult::Ambiguous(t, _) => t.timestamp(),
@@ -40,7 +40,7 @@ pub fn list(
     let (viewer, user) = profiles.user_id(init, now)?;
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     profiles.register(&db, viewer, &user, now)?;
-    let end = end_of_window(now, days, timezone)?;
+    let end = end_of_window(now, days.clamp(1, 31), timezone)?;
     let mut stmt = db.prepare("SELECT t.id,t.title,t.training_type,t.start_at,t.duration_min,t.capacity,t.level,t.reminder_enabled,t.reminder_offset_min,t.created_by, (SELECT COUNT(*) FROM bookings b WHERE b.training_id=t.id AND b.status='booked') FROM trainings t WHERE t.start_at>=?1 AND t.start_at<=?2 AND t.deleted_at IS NULL ORDER BY t.start_at ASC").map_err(|_| ProfileError::Storage)?;
     let rows = stmt
         .query_map(params![now, end], |r| {

@@ -60,7 +60,11 @@ pub(crate) fn coach(
     }
     Ok(id)
 }
-fn local_timestamp(date: &str, time: &str, tz: chrono_tz::Tz) -> Result<i64, ProfileError> {
+pub(crate) fn local_timestamp(
+    date: &str,
+    time: &str,
+    tz: chrono_tz::Tz,
+) -> Result<i64, ProfileError> {
     if date.len() != 10 || time.len() != 5 {
         return Err(ProfileError::Rule(422, "Некорректные дата/время."));
     }

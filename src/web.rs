@@ -506,6 +506,32 @@ async fn match_join(
     })
     .await
 }
+async fn match_create(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::match_api::NewMatch>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| api.create(&p, &i, n, body)).await
+}
+#[derive(serde::Deserialize)]
+struct MatchQuery {
+    #[serde(default = "match_default_days")]
+    days: i64,
+}
+fn match_default_days() -> i64 {
+    30
+}
+async fn match_list(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<MatchQuery>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::match_list::list(&p, &i, n, query.days)
+    })
+    .await
+}
 async fn match_leave(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -780,6 +806,7 @@ pub fn router(
         .route("/api/avatar/{id}", get(avatar_legacy))
         .route("/api/avatar/{id}/{version}", get(avatar_versioned))
         .route("/api/trainings", get(api_trainings))
+        .route("/api/matches", get(match_list).post(match_create))
         .route("/api/matches/{id}/join", post(match_join))
         .route("/api/matches/{id}/leave", post(match_leave))
         .route(
@@ -907,9 +934,37 @@ mod tests {
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
             false,
-            Some(profiles),
+            Some(profiles.clone()),
             None,
         );
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/matches")
+                    .header("x-init-data", signed(1))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"date":"2099-01-01","time":"12:00"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let data: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), 65536).await.unwrap()).unwrap();
+        let created_id = data["id"].as_i64().unwrap();
+        let status: String = profiles
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM match_players WHERE match_id=?1 AND user_id=1",
+                [created_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "booked");
         assert_eq!(
             request(app.clone(), "/api/matches/1/join", "").await.0,
             StatusCode::UNAUTHORIZED
@@ -922,6 +977,36 @@ mod tests {
                 "pending"
             );
         }
+        async fn listing(app: Router, token: &str) -> serde_json::Value {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/matches")
+                        .header("x-init-data", token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap()
+        }
+        let public = listing(app.clone(), &signed(2)).await;
+        let card = &public["matches"][0];
+        assert_eq!(card["pending_count"], 2);
+        assert_eq!(card["pending_requests"].as_array().unwrap().len(), 0);
+        let manager = listing(app.clone(), &signed(1)).await;
+        assert_eq!(
+            manager["matches"][0]["pending_requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            manager["matches"][0]["pending_requests"][0]["telegram_id"],
+            2
+        );
         assert_eq!(
             request(app.clone(), "/api/matches/1/requests/2/approve", &signed(3))
                 .await
@@ -934,6 +1019,20 @@ mod tests {
                 .1["status"],
             "booked"
         );
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET display_mode='animal',first_name='Private' WHERE telegram_id=2",
+                [],
+            )
+            .unwrap();
+        let public = listing(app.clone(), &signed(3)).await;
+        let person = &public["matches"][0]["participants"][0];
+        assert_eq!(person["anonymous"], true);
+        assert_ne!(person["first_name"], "Private");
+        assert!(person.get("telegram_id").is_none());
         assert_eq!(
             request(app.clone(), "/api/matches/1/requests/3/approve", &signed(4))
                 .await

@@ -12,11 +12,13 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct MatchApi {
     limiter: Arc<Mutex<RateLimiter>>,
+    create_limiter: Arc<Mutex<RateLimiter>>,
 }
 impl Default for MatchApi {
     fn default() -> Self {
         Self {
             limiter: Arc::new(Mutex::new(RateLimiter::new(30, Duration::from_secs(60)))),
+            create_limiter: Arc::new(Mutex::new(RateLimiter::new(3, Duration::from_secs(600)))),
         }
     }
 }
@@ -27,7 +29,96 @@ pub enum Action {
     Approve(i64),
     Reject(i64),
 }
+fn default_title() -> String {
+    "Матч".into()
+}
+fn default_duration() -> i64 {
+    60
+}
+fn default_capacity() -> i64 {
+    4
+}
+#[derive(serde::Deserialize)]
+pub struct NewMatch {
+    date: String,
+    time: String,
+    #[serde(default = "default_title")]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default = "default_duration")]
+    duration_min: i64,
+    #[serde(default = "default_capacity")]
+    max_players: i64,
+    #[serde(default)]
+    level: String,
+}
 impl MatchApi {
+    pub fn create(
+        &self,
+        profiles: &Profiles,
+        init: &str,
+        now: i64,
+        value: NewMatch,
+    ) -> Result<Value, ProfileError> {
+        let (actor, user) = profiles.user_id(init, now)?;
+        self.create_limiter
+            .lock()
+            .map_err(|_| ProfileError::Storage)?
+            .check(&actor.to_string())
+            .map_err(ProfileError::RateLimited)?;
+        if !(1..=100).contains(&value.title.chars().count())
+            || value.description.chars().count() > 450
+            || value.location.chars().count() > 120
+            || value.level.chars().count() > 60
+            || !(15..=600).contains(&value.duration_min)
+            || !(2..=20).contains(&value.max_players)
+        {
+            return Err(ProfileError::Invalid("Некорректные данные матча."));
+        }
+        let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+        profiles.register(&db, actor, &user, now)?;
+        if profiles.phone_required_from.is_some_and(|date| now >= date) {
+            let phone: String = db
+                .query_row(
+                    "SELECT phone FROM users WHERE telegram_id=?1",
+                    [actor],
+                    |r| r.get(0),
+                )
+                .map_err(|_| ProfileError::Storage)?;
+            if phone.is_empty() {
+                return Err(ProfileError::Rule(
+                    403,
+                    "Укажите телефон в настройках профиля, чтобы создать матч.",
+                ));
+            }
+        }
+        let start = crate::coach::local_timestamp(&value.date, &value.time, profiles.timezone)?;
+        if start <= now {
+            return Err(ProfileError::Rule(400, "Нельзя создать матч в прошлом"));
+        }
+        let level = value.level.trim();
+        if !level.is_empty()
+            && ![
+                "Новичок (Into)",
+                "Начинающий (Beginner)",
+                "Уверенный любитель (С)",
+            ]
+            .contains(&level)
+        {
+            return Err(ProfileError::Rule(422, "Неизвестный уровень игры"));
+        }
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ProfileError::Storage)?;
+        tx.execute("INSERT INTO matches(title,description,location,start_at,duration_min,max_players,level,created_by,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![value.title.trim(),value.description.trim(),value.location.trim(),start,value.duration_min,value.max_players,level,actor,now]).map_err(|_|ProfileError::Storage)?;
+        let id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO match_players(match_id,user_id,status,created_at) VALUES(?1,?2,'booked',?3)",params![id,actor,now]).map_err(|_|ProfileError::Storage)?;
+        tx.commit().map_err(|_| ProfileError::Storage)?;
+        Ok(json!({"ok":true,"id":id}))
+    }
     pub fn attendance(
         &self,
         profiles: &Profiles,
