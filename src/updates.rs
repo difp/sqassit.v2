@@ -89,6 +89,10 @@ pub async fn webhook<T: BotTransport>(
     match bot::handle_update(profiles, bot, config.base_url, config.notifier, update, now).await {
         Ok(()) | Err(BotError::Unsupported) => (200, json!({"ok":true})),
         Err(BotError::Database | BotError::Telegram) => (503, json!({"ok":false})),
+        Err(BotError::Malformed) if update.get("update_id").and_then(Value::as_i64).is_some() => {
+            eprintln!("Ignoring malformed Telegram update");
+            (200, json!({"ok":true}))
+        }
         Err(BotError::Malformed) => (400, json!({"ok":false})),
     }
 }
@@ -108,13 +112,14 @@ async fn process_batch<T: BotTransport>(
         };
         match bot::handle_update(profiles, bot, base, notifier, update, now).await {
             Ok(()) | Err(BotError::Unsupported) => {}
+            Err(BotError::Malformed) => eprintln!("Ignoring malformed Telegram update"),
             Err(_) => return Err(offset),
         }
         offset = id.saturating_add(1);
     }
     Ok(offset)
 }
-/// Ignore unrelated updates; retain failed updates for retry.
+/// Ignore unrelated or malformed updates with an ID; retain transient failures for retry.
 pub async fn poll(runtime: BotRuntime) {
     let mut offset: i64 = 0;
     loop {
@@ -320,6 +325,48 @@ mod tests {
             Ok(13)
         );
         assert_eq!(*bot.0.lock().unwrap(), 2);
+    }
+    #[tokio::test]
+    async fn malformed_updates_with_ids_do_not_block_the_queue() {
+        let p = service();
+        let bot = Fake::default();
+        let notifier = crate::event_notify::EventNotifier::default();
+        let malformed = json!({"update_id":11,"callback_query":{"id":"x","from":{"id":42},"data":"slots:book:not-a-number"}});
+        let messages = vec![
+            json!({"update_id":10,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}}),
+            malformed.clone(),
+            json!({"update_id":12,"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}}),
+        ];
+        assert_eq!(
+            process_batch(&p, &bot, "", &notifier, &messages, 0, 1).await,
+            Ok(13)
+        );
+        assert_eq!(*bot.0.lock().unwrap(), 2);
+        let missing_id = json!({"message":{"from":{"id":42},"chat":{"id":42},"text":"/phone"}});
+        assert_eq!(
+            process_batch(&p, &bot, "", &notifier, &[missing_id], 13, 1).await,
+            Err(13)
+        );
+        let config = || WebhookConfig {
+            mode: BotMode::Webhook,
+            secret: "secret",
+            base_url: "",
+            notifier: &notifier,
+        };
+        assert_eq!(
+            webhook(&p, &bot, config(), "secret", &malformed, 1).await.0,
+            200
+        );
+        let no_id =
+            json!({"callback_query":{"id":"x","from":{"id":42},"data":"slots:book:not-a-number"}});
+        assert_eq!(
+            webhook(&p, &bot, config(), "secret", &no_id, 1).await.0,
+            400
+        );
+        assert_eq!(
+            webhook(&p, &bot, config(), "wrong", &malformed, 1).await.0,
+            403
+        );
     }
     #[tokio::test]
     async fn polling_keeps_transport_failure_unacknowledged() {
