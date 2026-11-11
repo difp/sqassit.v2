@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
-fn end_of_window(now: i64, days: i64, timezone: Tz) -> Result<i64, ProfileError> {
+pub(crate) fn end_of_window(now: i64, days: i64, timezone: Tz) -> Result<i64, ProfileError> {
     let start = DateTime::<Utc>::from_timestamp(now, 0)
         .ok_or(ProfileError::Storage)?
         .with_timezone(&timezone);

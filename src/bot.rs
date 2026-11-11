@@ -19,7 +19,7 @@ impl From<TelegramError> for BotError {
         Self::Telegram
     }
 }
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -38,7 +38,7 @@ fn keyboard(base: &str) -> Value {
 fn phone_keyboard() -> Value {
     json!({"keyboard":[[{"text":"📱 Поделиться телефоном","request_contact":true}]],"resize_keyboard":true,"one_time_keyboard":true})
 }
-async fn send<T: BotTransport>(
+pub(crate) async fn send<T: BotTransport>(
     bot: &T,
     chat: i64,
     text: &str,
@@ -106,6 +106,9 @@ pub async fn handle_update<T: BotTransport>(
     update: &Value,
     now: i64,
 ) -> Result<(), BotError> {
+    if let Some(callback) = update.get("callback_query") {
+        return crate::bot_slots::handle_callback(profiles, bot, callback, now).await;
+    }
     let message = update.get("message").ok_or(BotError::Unsupported)?;
     let from = message.get("from").ok_or(BotError::Malformed)?;
     let id = from
@@ -214,7 +217,9 @@ pub async fn handle_update<T: BotTransport>(
         "/phone" => {
             send(bot,chat,"📱 Поделитесь телефоном, чтобы тренер мог связаться с вами. Можно также ввести номер вручную в настройках профиля.",Some(phone_keyboard())).await?;
         }
-        "/slots" => return Err(BotError::Unsupported),
+        "/slots" => {
+            crate::bot_slots::send_slots(profiles, bot, chat, id, now, false).await?;
+        }
         _ => {
             send(
                 bot,
@@ -322,10 +327,9 @@ mod tests {
             "+79991234567"
         );
         let slots = json!({"message":{"from":{"id":42},"chat":{"id":42},"text":"/slots"}});
-        assert!(matches!(
-            handle_update(&profiles, &bot, "", &slots, 1004).await,
-            Err(BotError::Unsupported)
-        ));
+        handle_update(&profiles, &bot, "", &slots, 1004)
+            .await
+            .unwrap();
     }
     #[tokio::test]
     async fn unchanged_rules_do_not_create_duplicate_messages() {
@@ -360,5 +364,74 @@ mod tests {
             .unwrap();
         assert_eq!(message, 88);
         assert_eq!(text, RULES);
+    }
+    #[tokio::test]
+    async fn slot_callbacks_book_cancel_and_hide_private_details() {
+        let profiles = profiles();
+        let bot = Fake::default();
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute("INSERT INTO users(telegram_id,first_name,username,phone,display_mode,created_at) VALUES(42,'Игрок',NULL,'','name',0)",[]).unwrap();
+            db.execute("INSERT INTO users(telegram_id,first_name,username,phone,display_mode,created_at) VALUES(314,'Секрет','secret_handle','1234567890','animal',0)",[]).unwrap();
+            db.execute("INSERT INTO trainings(id,title,training_type,start_at,capacity,created_at) VALUES(7,'x','Тест',25000,2,0)",[]).unwrap();
+            db.execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(7,314,'booked',0)",[]).unwrap();
+        }
+        let callback = |data: &str| json!({"callback_query":{"id":"cb","from":{"id":42},"data":data,"message":{"message_id":55,"chat":{"id":42}}}});
+        handle_update(&profiles, &bot, "", &callback("slots:show:7"), 1000)
+            .await
+            .unwrap();
+        handle_update(&profiles, &bot, "", &callback("slots:book:7"), 1000)
+            .await
+            .unwrap();
+        assert_eq!(
+            profiles
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM bookings WHERE training_id=7 AND user_id=42",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "booked"
+        );
+        handle_update(&profiles, &bot, "", &callback("attendees:show:7"), 1000)
+            .await
+            .unwrap();
+        {
+            let calls = bot.calls.lock().unwrap();
+            let text = calls
+                .iter()
+                .rev()
+                .find(|(m, _)| m == "sendMessage")
+                .unwrap()
+                .1["text"]
+                .as_str()
+                .unwrap();
+            assert!(!text.contains("Секрет"));
+            assert!(!text.contains("secret_handle"));
+            assert!(!text.contains("1234567890"));
+        }
+        handle_update(&profiles, &bot, "", &callback("slots:cancel:7"), 1000)
+            .await
+            .unwrap();
+        assert_eq!(
+            profiles
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM bookings WHERE training_id=7 AND user_id=42",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "cancelled"
+        );
+        assert!(matches!(
+            handle_update(&profiles, &bot, "", &callback("apply:ok:99"), 1000).await,
+            Err(BotError::Unsupported)
+        ));
     }
 }
