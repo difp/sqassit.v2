@@ -419,6 +419,70 @@ pub fn list_active(profiles: &Profiles, init: &str, now: i64) -> Result<Value, P
     Ok(json!({"ok":true,"trainings":items}))
 }
 
+/// History and recycle bin are private to the creator, even for coauthors.
+pub fn list_archive(
+    profiles: &Profiles,
+    init: &str,
+    now: i64,
+    limit: i64,
+    deleted: bool,
+) -> Result<Value, ProfileError> {
+    let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+    let actor = coach(profiles, &db, init, now)?;
+    let sql = if deleted {
+        "SELECT t.id,t.title,t.training_type,t.start_at,t.duration_min,t.capacity,t.level,t.reminder_enabled,t.reminder_offset_min,t.deleted_at,(SELECT count(*) FROM bookings b WHERE b.training_id=t.id AND b.status='booked'),(SELECT count(*) FROM bookings b WHERE b.training_id=t.id AND b.status='waitlist') FROM trainings t WHERE t.deleted_at IS NOT NULL AND t.created_by=?1 ORDER BY t.deleted_at DESC LIMIT ?2"
+    } else {
+        "SELECT t.id,t.title,t.training_type,t.start_at,t.duration_min,t.capacity,t.level,t.reminder_enabled,t.reminder_offset_min,t.deleted_at,(SELECT count(*) FROM bookings b WHERE b.training_id=t.id AND b.status='booked'),(SELECT count(*) FROM bookings b WHERE b.training_id=t.id AND b.status='waitlist') FROM trainings t WHERE t.start_at<?3 AND t.deleted_at IS NULL AND t.created_by=?1 ORDER BY t.start_at DESC LIMIT ?2"
+    };
+    let mut stmt = db.prepare(sql).map_err(|_| ProfileError::Storage)?;
+    let params_vec: Vec<rusqlite::types::Value> = if deleted {
+        vec![actor.into(), limit.clamp(1, 500).into()]
+    } else {
+        vec![actor.into(), limit.clamp(1, 500).into(), now.into()]
+    };
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_vec), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, bool>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, Option<i64>>(9)?,
+                r.get::<_, i64>(10)?,
+                r.get::<_, i64>(11)?,
+            ))
+        })
+        .map_err(|_| ProfileError::Storage)?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (
+            id,
+            title,
+            typ,
+            start,
+            duration,
+            capacity,
+            level,
+            reminder,
+            offset,
+            deleted_at,
+            booked,
+            waitlist,
+        ) = row.map_err(|_| ProfileError::Storage)?;
+        let local = chrono::DateTime::<chrono::Utc>::from_timestamp(start, 0)
+            .ok_or(ProfileError::Storage)?
+            .with_timezone(&profiles.timezone);
+        let seconds = start - now;
+        items.push(json!({"id":id,"title":title,"type":typ,"start_at":start,"date":local.format("%Y-%m-%d").to_string(),"time":local.format("%H:%M").to_string(),"datetime_local":local.format("%d.%m.%Y %H:%M").to_string(),"duration_min":duration,"capacity":capacity,"level":level,"booked_count":booked,"waitlist_count":waitlist,"reminder_enabled":reminder,"reminder_offset_min":offset,"deleted":deleted_at.unwrap_or(0)!=0,"can_self_cancel":seconds>=270*60,"is_booked":false,"is_waitlisted":false,"is_pending":false,"is_past":seconds<=0,"seconds_left":seconds,"cancel_lock_minutes":270,"ics_token":crate::auth::issue_scoped_token(&profiles.bot_token,"ics",id,actor,now,86400)}));
+    }
+    Ok(json!({"ok":true,"trainings":items}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +504,30 @@ mod tests {
     }
     fn training(force: bool) -> NewTraining {
         serde_json::from_value(json!({"date":"2001-09-10","time":"12:00","force":force})).unwrap()
+    }
+    #[test]
+    fn archive_is_private_ordered_and_includes_counts() {
+        let p = service(42);
+        {
+            let db = p.db.lock().unwrap();
+            db.execute_batch("INSERT INTO trainings(id,title,start_at,created_at,created_by,deleted_at) VALUES(1,'old',100,0,42,NULL),(2,'new',200,0,42,NULL),(3,'deleted',300,0,42,400),(4,'other',250,0,77,NULL),(5,'other deleted',300,0,77,450); INSERT INTO event_coauthors(event_type,event_id,user_id,created_at) VALUES('training',4,42,0); INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(2,99,'booked',0),(2,100,'waitlist',0);").unwrap();
+        }
+        let history = list_archive(&p, INIT, 1_000_000, 1, false).unwrap();
+        assert_eq!(history["trainings"].as_array().unwrap().len(), 1);
+        assert_eq!(history["trainings"][0]["id"], 2);
+        assert_eq!(history["trainings"][0]["booked_count"], 1);
+        assert_eq!(history["trainings"][0]["waitlist_count"], 1);
+        let trash = list_archive(&p, INIT, 1_000_000, 100, true).unwrap();
+        assert_eq!(trash["trainings"].as_array().unwrap().len(), 1);
+        assert_eq!(trash["trainings"][0]["id"], 3);
+        assert_eq!(trash["trainings"][0]["deleted"], true);
+        lifecycle(&p, INIT, 1_000_000, 3, Action::Restore).unwrap();
+        assert!(
+            list_archive(&p, INIT, 1_000_000, 100, true).unwrap()["trainings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn owner_create_duplicate_delete_restore_and_purge() {

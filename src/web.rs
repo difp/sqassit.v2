@@ -788,6 +788,34 @@ async fn coach_list(State(state): State<WebState>, headers: HeaderMap) -> Respon
     })
     .await
 }
+#[derive(serde::Deserialize)]
+struct ArchiveQuery {
+    #[serde(default = "archive_limit")]
+    limit: i64,
+}
+fn archive_limit() -> i64 {
+    100
+}
+async fn coach_history(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<ArchiveQuery>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::list_archive(&p, &i, n, query.limit, false)
+    })
+    .await
+}
+async fn coach_deleted(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<ArchiveQuery>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::list_archive(&p, &i, n, query.limit, true)
+    })
+    .await
+}
 async fn coach_create(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1047,6 +1075,8 @@ pub fn router(
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
         .route("/api/coach/trainings/batch", post(coach_create_batch))
+        .route("/api/coach/history", get(coach_history))
+        .route("/api/coach/deleted", get(coach_deleted))
         .route("/api/coach/pending", get(coach_pending))
         .route(
             "/api/coach/trainings/{id}/participants",
@@ -1571,6 +1601,30 @@ mod tests {
         let past = r#"{"period_start":"2020-01-06","period_end":"2020-01-06","weekdays":[0],"time":"19:00"}"#;
         let (_, past) = send(coach_app.clone(), "POST", path, &signed, past).await;
         assert_eq!(past["skipped"][0]["reason"], "past");
+        assert_eq!(
+            send(app.clone(), "GET", "/api/coach/history", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "GET",
+                "/api/coach/history?limit=1",
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(coach_app.clone(), "GET", "/api/coach/deleted", &signed, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
         coach_db.lock().unwrap().execute_batch("CREATE TRIGGER fail_second_batch BEFORE INSERT ON trainings WHEN NEW.training_type='Fail batch' AND EXISTS(SELECT 1 FROM trainings WHERE training_type='Fail batch') BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
         let fail = batch.replace("Batch", "Fail batch");
         assert_eq!(
