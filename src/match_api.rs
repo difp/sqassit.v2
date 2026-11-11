@@ -56,6 +56,66 @@ pub struct NewMatch {
     level: String,
 }
 impl MatchApi {
+    /// Only booked players, the organizer and coauthors may obtain the room code.
+    pub fn room(
+        &self,
+        profiles: &Profiles,
+        init: &str,
+        now: i64,
+        id: i64,
+    ) -> Result<Value, ProfileError> {
+        let (actor, user) = profiles.user_id(init, now)?;
+        let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+        profiles.register(&db, actor, &user, now)?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ProfileError::Storage)?;
+        let event: Option<(i64,Option<String>)>=tx.query_row("SELECT created_by,room_code FROM matches WHERE id=?1 AND (deleted_at IS NULL OR deleted_at=0)",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|ProfileError::Storage)?;
+        let (creator, existing) = event.ok_or(ProfileError::Rule(404, "Матч не найден"))?;
+        let allowed: bool=creator==actor || tx.query_row("SELECT EXISTS(SELECT 1 FROM match_players WHERE match_id=?1 AND user_id=?2 AND status='booked' UNION ALL SELECT 1 FROM event_coauthors WHERE event_type='match' AND event_id=?1 AND user_id=?2)",params![id,actor],|r|r.get(0)).map_err(|_|ProfileError::Storage)?;
+        if !allowed {
+            return Err(ProfileError::Rule(403, "Турнир доступен участникам матча"));
+        }
+        let code = if let Some(code) = existing {
+            code
+        } else {
+            let mut bytes = [0_u8; 8];
+            getrandom::getrandom(&mut bytes).map_err(|_| ProfileError::Storage)?;
+            const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            let code = format!(
+                "SQ-{}",
+                bytes
+                    .iter()
+                    .map(|b| char::from(ALPHABET[(b & 31) as usize]))
+                    .collect::<String>()
+            );
+            tx.execute(
+                "UPDATE matches SET room_code=?1 WHERE id=?2 AND room_code IS NULL",
+                params![code, id],
+            )
+            .map_err(|_| ProfileError::Storage)?;
+            code
+        };
+        tx.commit().map_err(|_| ProfileError::Storage)?;
+        Ok(json!({"ok":true,"code":code}))
+    }
+    /// Soft-delete is reserved for the organizer. Event notifications are not yet migrated.
+    pub fn delete(
+        &self,
+        profiles: &Profiles,
+        init: &str,
+        now: i64,
+        id: i64,
+    ) -> Result<Value, ProfileError> {
+        let (actor, user) = profiles.user_id(init, now)?;
+        let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
+        profiles.register(&db, actor, &user, now)?;
+        let updated=db.execute("UPDATE matches SET deleted_at=?1 WHERE id=?2 AND created_by=?3 AND (deleted_at IS NULL OR deleted_at=0)",params![now,id,actor]).map_err(|_|ProfileError::Storage)?;
+        if updated == 0 {
+            return Err(ProfileError::Rule(404, "Матч не найден"));
+        }
+        Ok(json!({"ok":true}))
+    }
     pub fn create(
         &self,
         profiles: &Profiles,

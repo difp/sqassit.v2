@@ -514,6 +514,22 @@ async fn match_create(
     let api = state.match_api.clone();
     profile_work(state, headers, move |p, i, n| api.create(&p, &i, n, body)).await
 }
+async fn match_room(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| api.room(&p, &i, n, id)).await
+}
+async fn match_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let api = state.match_api.clone();
+    profile_work(state, headers, move |p, i, n| api.delete(&p, &i, n, id)).await
+}
 #[derive(serde::Deserialize)]
 struct MatchQuery {
     #[serde(default = "match_default_days")]
@@ -807,6 +823,8 @@ pub fn router(
         .route("/api/avatar/{id}/{version}", get(avatar_versioned))
         .route("/api/trainings", get(api_trainings))
         .route("/api/matches", get(match_list).post(match_create))
+        .route("/api/matches/{id}", axum::routing::delete(match_delete))
+        .route("/api/matches/{id}/room", post(match_room))
         .route("/api/matches/{id}/join", post(match_join))
         .route("/api/matches/{id}/leave", post(match_leave))
         .route(
@@ -977,6 +995,26 @@ mod tests {
                 "pending"
             );
         }
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/room", &signed(2))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let code = request(app.clone(), "/api/matches/1/room", &signed(4))
+            .await
+            .1["code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(code.len(), 11);
+        assert!(code.starts_with("SQ-"));
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/room", &signed(1))
+                .await
+                .1["code"],
+            code
+        );
         async fn listing(app: Router, token: &str) -> serde_json::Value {
             let response = app
                 .oneshot(
@@ -1018,6 +1056,12 @@ mod tests {
                 .await
                 .1["status"],
             "booked"
+        );
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/room", &signed(2))
+                .await
+                .1["code"],
+            code
         );
         profiles
             .db
@@ -1062,6 +1106,28 @@ mod tests {
                 .await
                 .0,
             StatusCode::BAD_REQUEST
+        );
+        async fn delete(app: Router, id: i64) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/matches/1")
+                    .header("x-init-data", signed(id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+        assert_eq!(delete(app.clone(), 4).await, StatusCode::NOT_FOUND);
+        assert_eq!(delete(app.clone(), 1).await, StatusCode::OK);
+        assert_eq!(delete(app.clone(), 1).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            request(app.clone(), "/api/matches/1/room", &signed(1))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
         );
     }
     #[test]
