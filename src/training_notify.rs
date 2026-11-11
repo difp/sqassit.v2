@@ -208,7 +208,7 @@ pub async fn lifecycle<T: BotTransport>(
     ) {
         let records = {
             let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-            let mut stmt=db.prepare("SELECT id,message_id,text FROM event_notifications WHERE entity_id=?1 AND kind IN ('training_booked','training_waitlist','training_rejected','training_reminder')").map_err(|_|NotifyError::Database)?;
+            let mut stmt=db.prepare("SELECT id,message_id,text FROM event_notifications WHERE entity_id=?1 AND kind IN ('training_booked','training_waitlist','training_rejected','training_reminder') ORDER BY id").map_err(|_|NotifyError::Database)?;
             let rows = stmt
                 .query_map([id], |r| {
                     Ok((
@@ -227,7 +227,7 @@ pub async fn lifecycle<T: BotTransport>(
             }
         }
     }
-    let pending_markup = if s.pending > 0 {
+    let pending_markup = if s.pending > 0 && !matches!(change, Lifecycle::Deleted) {
         Some(
             json!({"inline_keyboard":[[{"text":format!("Открыть заявки · {}",s.pending),"web_app":{"url":bot::web_app_url(base)}}]]}),
         )
@@ -263,7 +263,7 @@ pub async fn lifecycle<T: BotTransport>(
     }
     let participants = {
         let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-        let mut stmt=db.prepare("SELECT b.user_id,b.status,EXISTS(SELECT 1 FROM event_notifications n WHERE n.kind='training' AND n.entity_id=b.training_id AND n.chat_id=b.user_id AND n.user_id=b.user_id) FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY b.position,b.created_at").map_err(|_|NotifyError::Database)?;
+        let mut stmt=db.prepare("SELECT b.user_id,b.status,EXISTS(SELECT 1 FROM event_notifications n WHERE n.kind='training' AND n.entity_id=b.training_id AND n.chat_id=b.user_id AND n.user_id=b.user_id) FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY CASE b.status WHEN 'booked' THEN 0 ELSE 1 END,b.position ASC").map_err(|_|NotifyError::Database)?;
         let rows = stmt
             .query_map([id], |r| {
                 Ok((

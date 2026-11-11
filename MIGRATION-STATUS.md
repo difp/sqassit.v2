@@ -43,13 +43,15 @@ A seventh opt-in test compares chat notifications: the first message sends an al
 
 An eighth opt-in test compares security and cache headers on the HTML pages, `/tabs`, health and unauthorized API responses, and static JavaScript/HTML: CSP, `nosniff`, referrer and permissions policies, cache lifetimes and content types. It caught and fixed a missing UTF-8 charset on static files.
 
+A ninth opt-in test compares training-deletion notifications: booked/waitlist/rejected/reminder messages are deleted, the organizer card is edited without a pending-application button, and booked/waitlist/pending players receive the cancelled text. It caught and fixed delete ordering and a stray pending button on deleted trainings; it also aligned participant ordering with Python.
+
 Another cross-language test compares new and synthetic old databases after migration: table columns, index metadata and columns, selected data/backfills, and a repeated Rust migration. It does not replace testing against an anonymized copy of the actual production database or a backup/restore rehearsal.
 
 ## Still required
 
 This is **not yet a verified replacement**. All 75 reference HTTP routes are wired and the existing templates/static assets are served, but remaining release gates are:
 
-- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out, mixed-kind cleanup ordering, and match creation/feed notifications are not compared.
+- Cross-implementation parity does not cover actual avatar file downloads, the Telegram webhook or real `getMe`, and it normalizes time, scoped tokens and bot defaults; authorization coverage is representative rather than every route/role pair, and booking/cancellation notification fan-out, mixed-kind cleanup ordering, match creation/feed notifications, and training edit/restore notifications are not compared.
 - Real Telegram polling, webhook registration, notifications, reminders and restart/concurrency behavior remain unverified; delivery is best-effort and can duplicate after a side effect fails.
 - Browser Mini App scenarios, ICS, Unicode, avatar download/ETag and CSP behavior need end-to-end checks against Telegram; only a synthetic local 50,000-player directory benchmark exists, with no production load or database-size measurement.
 - Backup/restore, deployment on the target platform and rollback have not been rehearsed; the Xray/VLESS scripts remain Python-only.
