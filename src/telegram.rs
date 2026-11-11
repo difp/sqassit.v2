@@ -29,27 +29,66 @@ impl TelegramClient {
             token,
         })
     }
-    pub async fn send_html(&self, chat_id: i64, text: &str) -> Result<i64, TelegramError> {
-        let endpoint = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
+    async fn call(&self, method: &str, payload: Value) -> Result<Value, TelegramError> {
+        let endpoint = format!("https://api.telegram.org/bot{}/{method}", self.token);
         let response = self
             .client
             .post(endpoint)
-            .json(&json!({"chat_id":chat_id,"text":text,"parse_mode":"HTML"}))
+            .json(&payload)
             .send()
             .await
             .map_err(|_| TelegramError::Transport)?;
-        if !response.status().is_success() {
+        let status = response.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            return Err(TelegramError::Transport);
+        }
+        if !status.is_success() {
             return Err(TelegramError::Api);
         }
-        let value: Value = response.json().await.map_err(|_| TelegramError::Api)?;
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| TelegramError::Transport)?;
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(TelegramError::Api);
+            return Err(
+                if value
+                    .get("error_code")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|n| n == 429 || n >= 500)
+                {
+                    TelegramError::Transport
+                } else {
+                    TelegramError::Api
+                },
+            );
         }
+        Ok(value)
+    }
+    pub async fn send_html(&self, chat_id: i64, text: &str) -> Result<i64, TelegramError> {
+        let value = self
+            .call(
+                "sendMessage",
+                json!({"chat_id":chat_id,"text":text,"parse_mode":"HTML"}),
+            )
+            .await?;
         value
             .pointer("/result/message_id")
             .and_then(Value::as_i64)
             .filter(|n| *n > 0)
-            .ok_or(TelegramError::Api)
+            .ok_or(TelegramError::Transport)
+    }
+    pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TelegramError> {
+        let value = self
+            .call(
+                "deleteMessage",
+                json!({"chat_id":chat_id,"message_id":message_id}),
+            )
+            .await?;
+        if value.get("result").and_then(Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(TelegramError::Transport)
+        }
     }
 }
 
@@ -63,5 +102,18 @@ pub trait ReminderSender: Send + Sync {
 impl ReminderSender for TelegramClient {
     async fn send(&self, chat_id: i64, text: &str) -> Result<i64, TelegramError> {
         self.send_html(chat_id, text).await
+    }
+}
+
+pub trait ReminderDeleter: Send + Sync {
+    fn delete(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> impl std::future::Future<Output = Result<(), TelegramError>> + Send;
+}
+impl ReminderDeleter for TelegramClient {
+    async fn delete(&self, chat_id: i64, message_id: i64) -> Result<(), TelegramError> {
+        self.delete_message(chat_id, message_id).await
     }
 }

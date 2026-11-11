@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let allow_dev = matches!(dev.as_str(), "1" | "true" | "yes" | "on");
     eprintln!("SQASSIT Rust migration preview: incomplete; do not use in production. Listening on {address}");
     let listener = tokio::net::TcpListener::bind(address).await?;
-    // Explicit opt-in while the rest of the bot and message cleanup are unfinished.
+    // Explicit opt-in while the rest of the bot is unfinished.
     let enable_reminders = matches!(
         env::var("SQASSIT_ENABLE_REMINDERS")
             .unwrap_or_default()
@@ -111,6 +111,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .is_err()
                 {
                     eprintln!("Reminder tick failed; it will be retried");
+                }
+                if sqassit::reminders::cleanup_expired(&service, &client, now)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Reminder cleanup failed; it will be retried");
                 }
             }
         }))
