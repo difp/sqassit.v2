@@ -347,6 +347,7 @@ async fn account_delete(
                             training,
                             user,
                             status: "promoted",
+                            actor: None,
                             base: &bot.base_url,
                             now: now(),
                         };
@@ -949,6 +950,7 @@ async fn training_attendance(
                         training: id,
                         user: actor,
                         status: &status,
+                        actor: Some(actor),
                         base: &bot.base_url,
                         now: now(),
                     };
@@ -963,6 +965,7 @@ async fn training_attendance(
                             training: id,
                             user,
                             status: "promoted",
+                            actor: None,
                             base: &bot.base_url,
                             now: now(),
                         };
@@ -1353,16 +1356,13 @@ async fn coach_add_participant(
     Path(id): Path<i64>,
     Json(body): Json<crate::coach_participants::ParticipantIn>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach_participants::change(
-            &p,
-            &i,
-            n,
-            id,
-            body.user_id,
-            crate::coach_participants::Action::Add,
-        )
-    })
+    coach_participant_action(
+        state,
+        headers,
+        id,
+        body.user_id,
+        crate::coach_participants::Action::Add,
+    )
     .await
 }
 async fn coach_participant_action(
@@ -1372,10 +1372,82 @@ async fn coach_participant_action(
     user: i64,
     action: crate::coach_participants::Action,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach_participants::change(&p, &i, n, id, user, action)
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let worker = profiles.clone();
+    let init = init_data(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        let timestamp = now();
+        let actor = worker.user_id(&init, timestamp)?.0;
+        let value = crate::coach_participants::change(&worker, &init, timestamp, id, user, action)?;
+        Ok::<_, crate::profile::ProfileError>((value, actor))
     })
-    .await
+    .await;
+    match result {
+        Ok(Ok((value, actor))) => {
+            let already = value
+                .get("already")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Some(bot) = state.bot.filter(|_| !already) {
+                let status = match action {
+                    crate::coach_participants::Action::Reject => "rejected",
+                    crate::coach_participants::Action::Cancel => "cancelled",
+                    _ => value["status"].as_str().unwrap_or(""),
+                }
+                .to_owned();
+                let promoted = value
+                    .get("promoted")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.parse::<i64>().ok());
+                tokio::spawn(async move {
+                    let change = crate::training_notify::TrainingChange {
+                        training: id,
+                        user,
+                        status: &status,
+                        actor: Some(actor),
+                        base: &bot.base_url,
+                        now: now(),
+                    };
+                    if crate::training_notify::notify(&profiles, &bot.client, &bot.notifier, change)
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("Training notification delivery failed");
+                    }
+                    if let Some(user) = promoted {
+                        let change = crate::training_notify::TrainingChange {
+                            training: id,
+                            user,
+                            status: "promoted",
+                            actor: None,
+                            base: &bot.base_url,
+                            now: now(),
+                        };
+                        if crate::training_notify::notify(
+                            &profiles,
+                            &bot.client,
+                            &bot.notifier,
+                            change,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            eprintln!("Training promotion notification delivery failed");
+                        }
+                    }
+                });
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 macro_rules! participant_route {
     ($name:ident,$action:ident) => {

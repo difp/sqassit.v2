@@ -25,6 +25,7 @@ fn status_text(status: &str) -> &'static str {
 }
 struct Snapshot {
     player_header: String,
+    manager_header: String,
     summary: String,
     roster: String,
     date: String,
@@ -143,6 +144,7 @@ fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
     }
     Ok(Some(Snapshot {
         player_header: bot::escape(&player_header),
+        manager_header: bot::escape(&manager_header),
         summary,
         roster,
         date,
@@ -167,8 +169,9 @@ pub struct TrainingChange<'a> {
     pub status: &'a str,
     pub base: &'a str,
     pub now: i64,
+    pub actor: Option<i64>,
 }
-/// Sends the main editable cards. Legacy separate status cards and push alerts are not yet implemented.
+/// Sends editable cards and selected alerts. The legacy status-card lifecycle remains incomplete.
 pub async fn notify<T: BotTransport>(
     p: &Profiles,
     bot: &T,
@@ -181,6 +184,7 @@ pub async fn notify<T: BotTransport>(
         status,
         base,
         now,
+        actor,
     } = change;
     let Some(s) = snapshot(p, training)? else {
         return Ok(());
@@ -224,9 +228,71 @@ pub async fn notify<T: BotTransport>(
     {
         failed = true;
     }
+    // Refresh existing participant cards without creating new messages for others.
+    let existing = {
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        let mut stmt=db.prepare("SELECT b.user_id,b.status FROM bookings b JOIN event_notifications n ON n.kind='training' AND n.entity_id=b.training_id AND n.chat_id=b.user_id AND n.user_id=b.user_id WHERE b.training_id=?1 AND b.user_id!=?2 AND b.status IN ('pending','booked','waitlist')").map_err(|_|NotifyError::Database)?;
+        let rows = stmt
+            .query_map(params![training, user], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|_| NotifyError::Database)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| NotifyError::Database)?
+    };
+    for (other, other_status) in existing {
+        if allowed(p, other)? {
+            let text = format!(
+                "{}\n\n{}\n{}\n{}",
+                status_text(&other_status),
+                s.player_header,
+                s.date,
+                s.roster
+            );
+            if notifier
+                .send(
+                    p,
+                    bot,
+                    EventMessage {
+                        kind: "training",
+                        entity: training,
+                        chat: other,
+                        user: other,
+                        text: &text,
+                        markup: None,
+                        now,
+                    },
+                )
+                .await
+                .is_err()
+            {
+                failed = true;
+            }
+        }
+    }
+    let actor_name = if let Some(actor) = actor {
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        let value: Option<(Option<String>, String)> = db
+            .query_row(
+                "SELECT first_name,display_mode FROM users WHERE telegram_id=?1",
+                [actor],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| NotifyError::Database)?;
+        Some(match value {
+            Some((_, mode)) if mode == "animal" => identity::animal_identity(actor).1.to_owned(),
+            Some((name, _)) => name
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Игрок".into()),
+            None => "Игрок".into(),
+        })
+    } else {
+        None
+    };
     for manager in s.managers {
-        if allowed(p, manager)?
-            && notifier
+        if allowed(p, manager)? {
+            let delivery = notifier
                 .send(
                     p,
                     bot,
@@ -240,14 +306,42 @@ pub async fn notify<T: BotTransport>(
                         now,
                     },
                 )
-                .await
-                .is_err()
-        {
-            failed = true;
+                .await;
+            let edited = matches!(delivery, Ok(crate::event_notify::Delivery::Edited));
+            if delivery.is_err() {
+                failed = true;
+            }
+            if let Some(name) = actor_name.as_deref().filter(|_| actor != Some(manager)) {
+                if edited || matches!(status, "pending" | "waitlist" | "cancelled" | "rejected") {
+                    let action = match status {
+                        "pending" => "Новая заявка",
+                        "booked" => "Новая запись",
+                        "waitlist" => "В лист ожидания",
+                        "cancelled" => "Отмена записи",
+                        "rejected" => "Заявка отклонена",
+                        "promoted" => "Место освободилось",
+                        _ => "Изменение записи",
+                    };
+                    let alert = format!(
+                        "{action}: {}\n{}\n{}",
+                        bot::escape(name),
+                        s.manager_header,
+                        s.date
+                    );
+                    if crate::role_notify::notice(p, bot, manager, &alert, markup.clone(), now)
+                        .await
+                        .is_err()
+                    {
+                        failed = true;
+                    }
+                }
+            }
         }
     }
     // Telegram edits do not produce a push. Send a separate temporary notice on promotion.
-    if status == "promoted"
+    if (status == "promoted"
+        || (actor.is_some_and(|a| a != user)
+            && matches!(status, "booked" | "waitlist" | "rejected" | "cancelled")))
         && allowed(p, user)?
         && crate::role_notify::notice(p, bot, user, &personal, None, now)
             .await
@@ -277,6 +371,54 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn existing_cards_refresh_and_coach_receives_anonymous_alert() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute_batch("INSERT INTO users(telegram_id,first_name,display_mode,created_at) VALUES(1,'Coach','name',0),(2,'Private','animal',0),(4,'Other','name',0); INSERT INTO trainings(id,title,training_type,start_at,created_at,created_by) VALUES(1,'t','Squash',2000,0,1); INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(1,2,'booked',0),(1,4,'booked',1); INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('training',1,1,0,10,'old',0,9999),('training',1,4,4,11,'old',0,9999);").unwrap();
+        let p = Profiles {
+            db: Arc::new(Mutex::new(db)),
+            bot_token: "test".into(),
+            owner: 1,
+            timezone: chrono_tz::UTC,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: Arc::new(Mutex::new(RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ))),
+        };
+        let bot = Fake::default();
+        let notifier = EventNotifier::default();
+        notify(
+            &p,
+            &bot,
+            &notifier,
+            TrainingChange {
+                training: 1,
+                user: 2,
+                status: "booked",
+                actor: Some(2),
+                base: "https://example.test",
+                now: 1000,
+            },
+        )
+        .await
+        .unwrap();
+        let calls = bot.0.lock().unwrap();
+        assert!(calls.iter().any(|(method, v)| method == "editMessageText"
+            && v["chat_id"] == 4
+            && v["text"]
+                .as_str()
+                .unwrap()
+                .contains(identity::animal_identity(2).1)));
+        assert!(calls.iter().any(|(method, v)| method == "sendMessage"
+            && v["chat_id"] == 1
+            && v["text"].as_str().unwrap().contains("Новая запись")));
+        assert!(calls
+            .iter()
+            .all(|(_, v)| !v.to_string().contains("Private")));
+    }
+    #[tokio::test]
     async fn cards_respect_privacy_preferences_and_expire_reminders() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::storage::initialize(&mut db).unwrap();
@@ -303,6 +445,7 @@ mod tests {
                 training: 1,
                 user: 2,
                 status: "promoted",
+                actor: None,
                 base: "https://example.test",
                 now: 1000,
             },
@@ -339,6 +482,7 @@ mod tests {
                 training: 1,
                 user: 2,
                 status: "cancelled",
+                actor: None,
                 base: "https://example.test",
                 now: 1001,
             },
@@ -365,6 +509,7 @@ mod tests {
                 training: 1,
                 user: 3,
                 status: "pending",
+                actor: None,
                 base: "https://example.test",
                 now: 1002,
             },

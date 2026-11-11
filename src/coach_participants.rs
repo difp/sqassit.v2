@@ -1,4 +1,4 @@
-//! Coach operations on training participants. Telegram notifications remain pending.
+//! Coach operations on training participants. The HTTP layer sends preview notifications.
 use crate::{
     auth, booking, coach, identity,
     profile::{ProfileError, Profiles},
