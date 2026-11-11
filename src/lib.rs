@@ -24,6 +24,7 @@ pub mod messages;
 pub mod profile;
 pub mod rate_limit;
 pub mod reminders;
+pub mod role_notify;
 pub mod room;
 pub mod storage;
 pub mod telegram;

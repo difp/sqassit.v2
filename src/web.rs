@@ -817,8 +817,8 @@ async fn apply_create(
     Json(body): Json<crate::applications::ApplicationInput>,
 ) -> Response {
     let service = state.applications.clone();
-    profile_work(state, headers, move |p, i, n| {
-        service.apply(&p, &i, n, body)
+    role_action(state, headers, RoleNotice::Application, move |p, i, n| {
+        service.apply(p, i, n, body)
     })
     .await
 }
@@ -833,8 +833,8 @@ async fn application_approve(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::applications::decide(&p, &i, n, id, true)
+    role_action(state, headers, RoleNotice::Approved(id), move |p, i, n| {
+        crate::applications::decide(p, i, n, id, true)
     })
     .await
 }
@@ -843,8 +843,8 @@ async fn application_reject(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::applications::decide(&p, &i, n, id, false)
+    role_action(state, headers, RoleNotice::Rejected(id), move |p, i, n| {
+        crate::applications::decide(p, i, n, id, false)
     })
     .await
 }
@@ -853,8 +853,8 @@ async fn registry_add(
     headers: HeaderMap,
     Json(body): Json<crate::coach_registry::CoachInput>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach_registry::add(&p, &i, n, body)
+    role_action(state, headers, RoleNotice::Added, move |p, i, n| {
+        crate::coach_registry::add(p, i, n, body)
     })
     .await
 }
@@ -885,10 +885,126 @@ async fn coach_transfer(
     Path(id): Path<i64>,
     Json(body): Json<crate::coach_registry::CoachInput>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach_registry::transfer(&p, &i, n, id, body)
-    })
+    role_action(
+        state,
+        headers,
+        RoleNotice::Transferred(id),
+        move |p, i, n| crate::coach_registry::transfer(p, i, n, id, body),
+    )
     .await
+}
+enum RoleNotice {
+    Application,
+    Approved(i64),
+    Rejected(i64),
+    Added,
+    Transferred(i64),
+}
+async fn role_action<F>(
+    state: WebState,
+    headers: HeaderMap,
+    notice: RoleNotice,
+    operation: F,
+) -> Response
+where
+    F: FnOnce(
+            &crate::profile::Profiles,
+            &str,
+            i64,
+        ) -> Result<serde_json::Value, crate::profile::ProfileError>
+        + Send
+        + 'static,
+{
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    let worker = profiles.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let timestamp = now();
+        let actor = worker.user_id(&init, timestamp)?.0;
+        let value = operation(&worker, &init, timestamp)?;
+        Ok::<_, crate::profile::ProfileError>((value, actor))
+    })
+    .await;
+    match result {
+        Ok(Ok((value, actor))) => {
+            if let Some(bot) = state.bot {
+                let target = value.get("telegram_id").and_then(|v| v.as_i64());
+                let created = value
+                    .get("created")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                tokio::spawn(async move {
+                    let result = match notice {
+                        RoleNotice::Application => {
+                            crate::role_notify::application(
+                                &profiles,
+                                &bot.client,
+                                &bot.notifier,
+                                &bot.base_url,
+                                actor,
+                                now(),
+                            )
+                            .await
+                        }
+                        RoleNotice::Approved(id) => {
+                            crate::role_notify::new_coach(
+                                &profiles,
+                                &bot.client,
+                                &bot.base_url,
+                                id,
+                                now(),
+                            )
+                            .await
+                        }
+                        RoleNotice::Rejected(id) => {
+                            crate::role_notify::rejected(&profiles, &bot.client, id, now()).await
+                        }
+                        RoleNotice::Added if created => {
+                            if let Some(id) = target {
+                                crate::role_notify::new_coach(
+                                    &profiles,
+                                    &bot.client,
+                                    &bot.base_url,
+                                    id,
+                                    now(),
+                                )
+                                .await
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        RoleNotice::Transferred(training) => {
+                            if let Some(id) = target {
+                                crate::role_notify::transferred(
+                                    &profiles,
+                                    &bot.client,
+                                    id,
+                                    training,
+                                    now(),
+                                )
+                                .await
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        _ => Ok(()),
+                    };
+                    if result.is_err() {
+                        eprintln!("Coach notification delivery failed");
+                    }
+                });
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 #[derive(serde::Deserialize)]
 struct ArchiveQuery {
