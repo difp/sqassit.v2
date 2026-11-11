@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 pub struct NotesInput {
+    #[serde(default)]
     notes: String,
 }
 pub fn list(p: &Profiles, init: &str, now: i64, query: &str) -> Result<Value, ProfileError> {
@@ -151,6 +152,22 @@ mod tests {
             serde_json::from_value(json!({"notes":"note"})).unwrap(),
         )
         .unwrap();
+        notes(
+            &p,
+            INIT,
+            1_000_000,
+            99,
+            serde_json::from_value(json!({})).unwrap(),
+        )
+        .unwrap();
+        let stored: String =
+            p.db.lock()
+                .unwrap()
+                .query_row("SELECT notes FROM users WHERE telegram_id=99", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+        assert_eq!(stored, "");
         assert!(matches!(
             notes(
                 &p,
