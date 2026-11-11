@@ -31,6 +31,9 @@ struct Snapshot {
     date: String,
     managers: Vec<i64>,
     pending: i64,
+    owner: Option<i64>,
+    deleted: bool,
+    brief: String,
 }
 fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
     let db = p.db.lock().map_err(|_| NotifyError::Database)?;
@@ -86,6 +89,12 @@ fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
         .with_timezone(&p.timezone)
         .format("%d.%m / %H:%M")
         .to_string();
+    let brief_time = DateTime::<Utc>::from_timestamp(start, 0)
+        .ok_or(NotifyError::Database)?
+        .with_timezone(&p.timezone)
+        .format("%d.%m.%Y в %H:%M")
+        .to_string();
+    let brief = format!("{} · {brief_time}", bot::escape(typ));
     let mut stmt=db.prepare("SELECT b.user_id,b.status,u.first_name,u.display_mode FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY CASE b.status WHEN 'booked' THEN 0 ELSE 1 END,b.position ASC").map_err(|_|NotifyError::Database)?;
     let rows = stmt
         .query_map([id], |r| {
@@ -150,6 +159,9 @@ fn snapshot(p: &Profiles, id: i64) -> Result<Option<Snapshot>, NotifyError> {
         date,
         managers,
         pending,
+        owner,
+        deleted: deleted.unwrap_or(0) != 0,
+        brief,
     }))
 }
 fn allowed(p: &Profiles, id: i64) -> Result<bool, NotifyError> {
@@ -162,6 +174,163 @@ fn allowed(p: &Profiles, id: i64) -> Result<bool, NotifyError> {
     .optional()
     .map_err(|_| NotifyError::Database)
     .map(|v| v.unwrap_or(false))
+}
+#[derive(Clone, Copy)]
+pub enum Lifecycle {
+    Edited { changed_time: bool },
+    Deleted,
+    Restored,
+}
+/// Updates cards for a training change. Legacy booked-status scheduling remains separate.
+pub async fn lifecycle<T: BotTransport>(
+    p: &Profiles,
+    bot: &T,
+    notifier: &EventNotifier,
+    base: &str,
+    id: i64,
+    change: Lifecycle,
+    now: i64,
+) -> Result<(), NotifyError> {
+    let Some(s) = snapshot(p, id)? else {
+        return Ok(());
+    };
+    if s.deleted != matches!(change, Lifecycle::Deleted) {
+        return Ok(());
+    }
+    let mut failed = false;
+    if matches!(
+        change,
+        Lifecycle::Deleted | Lifecycle::Edited { changed_time: true }
+    ) {
+        let records = {
+            let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+            let mut stmt=db.prepare("SELECT id,message_id,text FROM event_notifications WHERE entity_id=?1 AND kind IN ('training_booked','training_waitlist','training_rejected','training_reminder')").map_err(|_|NotifyError::Database)?;
+            let rows = stmt
+                .query_map([id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|_| NotifyError::Database)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| NotifyError::Database)?
+        };
+        for (row, message, text) in records {
+            if notifier.delete(p, bot, row, message, &text).await.is_err() {
+                failed = true;
+            }
+        }
+    }
+    let pending_markup = if s.pending > 0 {
+        Some(
+            json!({"inline_keyboard":[[{"text":format!("Открыть заявки · {}",s.pending),"web_app":{"url":bot::web_app_url(base)}}]]}),
+        )
+    } else {
+        None
+    };
+    let managers = if matches!(change, Lifecycle::Deleted) {
+        s.owner.into_iter().collect()
+    } else {
+        s.managers.clone()
+    };
+    for manager in managers {
+        if allowed(p, manager)?
+            && notifier
+                .send(
+                    p,
+                    bot,
+                    EventMessage {
+                        kind: "training",
+                        entity: id,
+                        chat: manager,
+                        user: 0,
+                        text: &s.summary,
+                        markup: pending_markup.clone(),
+                        now,
+                    },
+                )
+                .await
+                .is_err()
+        {
+            failed = true;
+        }
+    }
+    let participants = {
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        let mut stmt=db.prepare("SELECT b.user_id,b.status,EXISTS(SELECT 1 FROM event_notifications n WHERE n.kind='training' AND n.entity_id=b.training_id AND n.chat_id=b.user_id AND n.user_id=b.user_id) FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY b.position,b.created_at").map_err(|_|NotifyError::Database)?;
+        let rows = stmt
+            .query_map([id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(|_| NotifyError::Database)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| NotifyError::Database)?
+    };
+    for (user, status, has_card) in participants {
+        if !allowed(p, user)? || (matches!(change, Lifecycle::Restored) && !has_card) {
+            continue;
+        }
+        let status = if matches!(change, Lifecycle::Deleted) {
+            "deleted"
+        } else {
+            status.as_str()
+        };
+        let text = format!(
+            "{}\n\n{}\n{}\n{}",
+            status_text(status),
+            s.player_header,
+            s.date,
+            s.roster
+        );
+        let result = notifier
+            .send(
+                p,
+                bot,
+                EventMessage {
+                    kind: "training",
+                    entity: id,
+                    chat: user,
+                    user,
+                    text: &text,
+                    markup: None,
+                    now,
+                },
+            )
+            .await;
+        let edited = matches!(result, Ok(crate::event_notify::Delivery::Edited));
+        if result.is_err() {
+            failed = true;
+        }
+        let notice = match change {
+            Lifecycle::Edited { .. } => Some(format!("Изменена тренировка.\n\n🏸 {}", s.brief)),
+            Lifecycle::Deleted if edited => Some(format!(
+                "{}\n{}\n{}",
+                status_text("deleted"),
+                s.player_header,
+                s.date
+            )),
+            _ => None,
+        };
+        if let Some(notice) = notice {
+            if crate::role_notify::notice(p, bot, user, &notice, None, now)
+                .await
+                .is_err()
+            {
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        Err(NotifyError::Telegram)
+    } else {
+        Ok(())
+    }
 }
 pub struct TrainingChange<'a> {
     pub training: i64,
@@ -369,6 +538,152 @@ mod tests {
             self.0.lock().unwrap().push((method.into(), value));
             Ok(json!({"result":{"message_id":123}}))
         }
+    }
+    #[tokio::test]
+    async fn lifecycle_updates_participants_and_clears_old_statuses() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute_batch("INSERT INTO users(telegram_id,first_name,notify_trainings,created_at) VALUES(1,'Coach',1,0),(2,'Player',1,0),(3,'Disabled',0,0); INSERT INTO trainings(id,title,training_type,start_at,created_at,created_by) VALUES(1,'t','<New>',2000,0,1); INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(1,2,'booked',0),(1,3,'pending',0); INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('training_booked',1,2,2,11,'old status',0,5000),('training_reminder',1,2,2,12,'old reminder',0,5000),('training',1,2,2,13,'old card',0,5000),('match',1,2,2,14,'unrelated',0,5000);").unwrap();
+        let p = Profiles {
+            db: Arc::new(Mutex::new(db)),
+            bot_token: "test".into(),
+            owner: 1,
+            timezone: chrono_tz::UTC,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: Arc::new(Mutex::new(RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ))),
+        };
+        let bot = Fake::default();
+        let notifier = EventNotifier::default();
+        lifecycle(
+            &p,
+            &bot,
+            &notifier,
+            "https://example.test",
+            1,
+            Lifecycle::Edited { changed_time: true },
+            1000,
+        )
+        .await
+        .unwrap();
+        {
+            let calls = bot.0.lock().unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(method, _)| method == "deleteMessage")
+                    .count(),
+                2
+            );
+            assert!(calls.iter().all(|(_, v)| v["chat_id"] != 3));
+            assert!(calls.iter().any(|(method, v)| method == "sendMessage"
+                && v["chat_id"] == 2
+                && v["text"].as_str().unwrap().contains("Изменена тренировка")));
+        }
+        {
+            let db = p.db.lock().unwrap();
+            assert_eq!(db.query_row("SELECT count(*) FROM event_notifications WHERE kind IN ('training_booked','training_reminder')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM event_notifications WHERE kind='match'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            db.execute("UPDATE trainings SET deleted_at=1001 WHERE id=1", [])
+                .unwrap();
+        }
+        lifecycle(
+            &p,
+            &bot,
+            &notifier,
+            "https://example.test",
+            1,
+            Lifecycle::Deleted,
+            1001,
+        )
+        .await
+        .unwrap();
+        {
+            let calls = bot.0.lock().unwrap();
+            assert!(calls.iter().any(|(_, v)| v["chat_id"] == 2
+                && v["text"]
+                    .as_str()
+                    .is_some_and(|v| v.contains("Тренировка отменена"))));
+        }
+        p.db.lock()
+            .unwrap()
+            .execute("UPDATE trainings SET deleted_at=NULL WHERE id=1", [])
+            .unwrap();
+        lifecycle(
+            &p,
+            &bot,
+            &notifier,
+            "https://example.test",
+            1,
+            Lifecycle::Restored,
+            1002,
+        )
+        .await
+        .unwrap();
+        let db = p.db.lock().unwrap();
+        let text:String=db.query_row("SELECT text FROM event_notifications WHERE kind='training' AND entity_id=1 AND user_id=2",[],|r|r.get(0)).unwrap();
+        assert!(text.starts_with("Вы записаны."));
+    }
+    #[tokio::test]
+    async fn lifecycle_retains_status_when_telegram_delete_is_temporary_failure() {
+        struct Offline;
+        impl BotTransport for Offline {
+            async fn request(&self, method: &str, _: Value) -> Result<Value, TelegramError> {
+                if method == "deleteMessage" {
+                    Err(TelegramError::Transport)
+                } else {
+                    Ok(json!({"result":{"message_id":100}}))
+                }
+            }
+        }
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute_batch("INSERT INTO trainings(id,title,start_at,created_by,created_at) VALUES(1,'t',2000,1,0); INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('training_reminder',1,2,2,12,'old',0,5000);").unwrap();
+        let p = Profiles {
+            db: Arc::new(Mutex::new(db)),
+            bot_token: "test".into(),
+            owner: 1,
+            timezone: chrono_tz::UTC,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: Arc::new(Mutex::new(RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ))),
+        };
+        assert!(lifecycle(
+            &p,
+            &Offline,
+            &EventNotifier::default(),
+            "",
+            1,
+            Lifecycle::Edited { changed_time: true },
+            1000
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            p.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM event_notifications WHERE kind='training_reminder'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
     #[tokio::test]
     async fn existing_cards_refresh_and_coach_receives_anonymous_alert() {

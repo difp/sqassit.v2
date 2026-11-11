@@ -1259,8 +1259,12 @@ async fn coach_edit(
     Path(id): Path<i64>,
     Json(body): Json<crate::coach::EditTraining>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach::edit(&p, &i, n, id, body)
+    coach_training_mutation(state, headers, id, move |p, i, n| {
+        let (value, changed, changed_time) = crate::coach::edit(p, i, n, id, body)?;
+        Ok((
+            value,
+            changed.then_some(crate::training_notify::Lifecycle::Edited { changed_time }),
+        ))
     })
     .await
 }
@@ -1269,8 +1273,11 @@ async fn coach_delete(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach::lifecycle(&p, &i, n, id, crate::coach::Action::Delete)
+    coach_training_mutation(state, headers, id, move |p, i, n| {
+        Ok((
+            crate::coach::lifecycle(p, i, n, id, crate::coach::Action::Delete)?,
+            Some(crate::training_notify::Lifecycle::Deleted),
+        ))
     })
     .await
 }
@@ -1279,10 +1286,65 @@ async fn coach_restore(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    profile_work(state, headers, move |p, i, n| {
-        crate::coach::lifecycle(&p, &i, n, id, crate::coach::Action::Restore)
+    coach_training_mutation(state, headers, id, move |p, i, n| {
+        Ok((
+            crate::coach::lifecycle(p, i, n, id, crate::coach::Action::Restore)?,
+            Some(crate::training_notify::Lifecycle::Restored),
+        ))
     })
     .await
+}
+async fn coach_training_mutation<F>(
+    state: WebState,
+    headers: HeaderMap,
+    id: i64,
+    operation: F,
+) -> Response
+where
+    F: FnOnce(
+            &crate::profile::Profiles,
+            &str,
+            i64,
+        ) -> Result<
+            (serde_json::Value, Option<crate::training_notify::Lifecycle>),
+            crate::profile::ProfileError,
+        > + Send
+        + 'static,
+{
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let worker = profiles.clone();
+    let init = init_data(&headers);
+    match tokio::task::spawn_blocking(move || operation(&worker, &init, now())).await {
+        Ok(Ok((value, change))) => {
+            if let (Some(bot), Some(change)) = (state.bot, change) {
+                tokio::spawn(async move {
+                    if crate::training_notify::lifecycle(
+                        &profiles,
+                        &bot.client,
+                        &bot.notifier,
+                        &bot.base_url,
+                        id,
+                        change,
+                        now(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("Training change notification delivery failed");
+                    }
+                });
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => profile_response(Err(error)),
+        Err(_) => profile_response(Err(crate::profile::ProfileError::Storage)),
+    }
 }
 async fn coach_purge(
     State(state): State<WebState>,

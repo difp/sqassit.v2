@@ -258,7 +258,7 @@ pub fn edit(
     now: i64,
     training_id: i64,
     payload: EditTraining,
-) -> Result<Value, ProfileError> {
+) -> Result<(Value, bool, bool), ProfileError> {
     let mut db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     let actor = coach(profiles, &db, init, now)?;
     let tx = db
@@ -298,7 +298,9 @@ pub fn edit(
             "Такая тренировка уже есть в расписании.",
         ));
     }
-    if start != old_start || name != old_type {
+    let changed = start != old_start || name != old_type;
+    let changed_time = start != old_start;
+    if changed {
         let changed = start != old_start;
         tx.execute("UPDATE trainings SET title=?1,training_type=?1,start_at=?2,reminder_sent=CASE WHEN ?3 THEN 0 ELSE reminder_sent END WHERE id=?4",params![name,start,changed,training_id]).map_err(|_|ProfileError::Storage)?;
         if changed {
@@ -311,7 +313,7 @@ pub fn edit(
         }
     }
     tx.commit().map_err(|_| ProfileError::Storage)?;
-    Ok(json!({"ok":true}))
+    Ok((json!({"ok":true}), changed, changed_time))
 }
 #[derive(Clone, Copy)]
 pub enum Action {
@@ -602,7 +604,16 @@ mod tests {
             time: "12:00".into(),
             training_type: "Перенос".into(),
         };
-        edit(&profiles, INIT, 1_000_000, id, edit_payload).unwrap();
+        let (_, changed, changed_time) =
+            edit(&profiles, INIT, 1_000_000, id, edit_payload).unwrap();
+        assert!(changed && changed_time);
+        let same = EditTraining {
+            date: "2001-09-11".into(),
+            time: "12:00".into(),
+            training_type: "Перенос".into(),
+        };
+        let (_, changed, changed_time) = edit(&profiles, INIT, 1_000_000, id, same).unwrap();
+        assert!(!changed && !changed_time);
         {
             let db = profiles.db.lock().unwrap();
             assert_eq!(
