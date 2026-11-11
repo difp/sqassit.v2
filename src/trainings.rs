@@ -7,6 +7,7 @@ use chrono::{DateTime, Days, LocalResult, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 pub(crate) fn end_of_window(now: i64, days: i64, timezone: Tz) -> Result<i64, ProfileError> {
     let start = DateTime::<Utc>::from_timestamp(now, 0)
@@ -41,6 +42,76 @@ pub fn list(
     let db = profiles.db.lock().map_err(|_| ProfileError::Storage)?;
     profiles.register(&db, viewer, &user, now)?;
     let end = end_of_window(now, days.clamp(1, 31), timezone)?;
+    // Load the whole schedule's bookings and coaches in batches, as the Python
+    // implementation does. This avoids three extra queries per training.
+    let mut statuses = HashMap::new();
+    let mut participants: HashMap<i64, Vec<Value>> = HashMap::new();
+    let mut waitlist_counts: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut stmt = db.prepare("SELECT b.training_id,b.user_id,b.status,u.telegram_id,u.first_name,u.avatar_file_id,u.display_mode FROM bookings b JOIN trainings t ON t.id=b.training_id LEFT JOIN users u ON u.telegram_id=b.user_id WHERE t.start_at>=?1 AND t.start_at<=?2 AND t.deleted_at IS NULL AND (b.status IN ('pending','booked','waitlist') OR b.user_id=?3) ORDER BY b.training_id,CASE b.status WHEN 'booked' THEN 0 ELSE 1 END,b.position ASC").map_err(|_| ProfileError::Storage)?;
+        let rows = stmt
+            .query_map(params![now, end, viewer], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|_| ProfileError::Storage)?;
+        for row in rows {
+            let (training, user, status, registered, name, file, mode) =
+                row.map_err(|_| ProfileError::Storage)?;
+            if user == viewer {
+                statuses.insert(training, status.clone());
+            }
+            if registered.is_none() {
+                continue;
+            }
+            if status == "waitlist" {
+                *waitlist_counts.entry(training).or_default() += 1;
+            }
+            if status != "booked" {
+                continue;
+            }
+            let anonymous = mode.as_deref() == Some("animal");
+            let (emoji, animal_name) = identity::animal_identity(user);
+            let (display, avatar, avatar_emoji) = if anonymous {
+                (animal_name.to_owned(), String::new(), emoji)
+            } else {
+                (
+                    name.filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "Игрок".to_owned()),
+                    profiles.avatar_url(user, file.as_deref(), false, now),
+                    "",
+                )
+            };
+            let token =
+                auth::issue_scoped_token(&profiles.bot_token, "profile", 0, user, now, 86_400);
+            participants.entry(training).or_default().push(json!({"first_name":display,"avatar_url":avatar,"avatar_emoji":avatar_emoji,"anonymous":anonymous,"profile_token":token,"status":status,"is_me":user==viewer}));
+        }
+    }
+    let mut coaches: HashMap<i64, Value> = HashMap::new();
+    {
+        let mut stmt = db.prepare("SELECT DISTINCT u.telegram_id,u.first_name,u.avatar_file_id,u.bio FROM trainings t JOIN users u ON u.telegram_id=t.created_by WHERE t.start_at>=?1 AND t.start_at<=?2 AND t.deleted_at IS NULL").map_err(|_| ProfileError::Storage)?;
+        let rows = stmt
+            .query_map(params![now, end], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|_| ProfileError::Storage)?;
+        for row in rows {
+            let (id, name, file, bio) = row.map_err(|_| ProfileError::Storage)?;
+            coaches.insert(id,json!({"telegram_id":id,"first_name":name.filter(|s|!s.is_empty()).unwrap_or_else(||"Тренер".to_owned()),"avatar_url":profiles.avatar_url(id,file.as_deref(),true,now),"bio":bio}));
+        }
+    }
     let mut stmt = db.prepare("SELECT t.id,t.title,t.training_type,t.start_at,t.duration_min,t.capacity,t.level,t.reminder_enabled,t.reminder_offset_min,t.created_by, (SELECT COUNT(*) FROM bookings b WHERE b.training_id=t.id AND b.status='booked') FROM trainings t WHERE t.start_at>=?1 AND t.start_at<=?2 AND t.deleted_at IS NULL ORDER BY t.start_at ASC").map_err(|_| ProfileError::Storage)?;
     let rows = stmt
         .query_map(params![now, end], |r| {
@@ -77,62 +148,12 @@ pub fn list(
         let local = DateTime::<Utc>::from_timestamp(start, 0)
             .ok_or(ProfileError::Storage)?
             .with_timezone(&timezone);
-        let my_status: Option<String> = db
-            .query_row(
-                "SELECT status FROM bookings WHERE training_id=?1 AND user_id=?2",
-                params![id, viewer],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|_| ProfileError::Storage)?;
-        let coach = match creator {
-            Some(coach_id) => db.query_row("SELECT first_name,avatar_file_id,bio FROM users WHERE telegram_id=?1",[coach_id],|r| {
-                let name: Option<String>=r.get(0)?; let file: Option<String>=r.get(1)?; let bio: String=r.get(2)?;
-                Ok(json!({"telegram_id":coach_id,"first_name":name.filter(|s|!s.is_empty()).unwrap_or_else(||"Тренер".to_owned()),"avatar_url":profiles.avatar_url(coach_id,file.as_deref(),true,now),"bio":bio}))
-            }).optional().map_err(|_|ProfileError::Storage)?,
-            None => None,
-        };
-        let mut participants = Vec::new();
-        let mut waitlist_count = 0;
-        let mut attendees=db.prepare("SELECT b.status,u.telegram_id,u.first_name,u.avatar_file_id,u.display_mode FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status IN ('pending','booked','waitlist') ORDER BY CASE b.status WHEN 'booked' THEN 0 ELSE 1 END,b.position ASC").map_err(|_|ProfileError::Storage)?;
-        let people = attendees
-            .query_map([id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|_| ProfileError::Storage)?;
-        for person in people {
-            let (status, person_id, name, file, mode) =
-                person.map_err(|_| ProfileError::Storage)?;
-            if status == "waitlist" {
-                waitlist_count += 1;
-            }
-            if status != "booked" {
-                continue;
-            }
-            let anonymous = mode == "animal";
-            let (emoji, animal_name) = identity::animal_identity(person_id);
-            let (display, avatar, avatar_emoji) = if anonymous {
-                (animal_name.to_owned(), String::new(), emoji)
-            } else {
-                (
-                    name.filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "Игрок".to_owned()),
-                    profiles.avatar_url(person_id, file.as_deref(), false, now),
-                    "",
-                )
-            };
-            let token =
-                auth::issue_scoped_token(&profiles.bot_token, "profile", 0, person_id, now, 86_400);
-            participants.push(json!({"first_name":display,"avatar_url":avatar,"avatar_emoji":avatar_emoji,"anonymous":anonymous,"profile_token":token,"status":status,"is_me":person_id==viewer}));
-        }
+        let my_status = statuses.get(&id).map(String::as_str);
+        let coach = creator.and_then(|coach_id| coaches.get(&coach_id));
+        let participants = participants.remove(&id).unwrap_or_default();
+        let waitlist_count = waitlist_counts.get(&id).copied().unwrap_or_default();
         let seconds = start - now;
-        trainings.push(json!({"id":id,"title":title,"type":training_type,"start_at":start,"date":local.format("%Y-%m-%d").to_string(),"time":local.format("%H:%M").to_string(),"datetime_local":local.format("%d.%m.%Y %H:%M").to_string(),"duration_min":duration,"capacity":capacity,"level":level,"booked_count":count,"waitlist_count":waitlist_count,"reminder_enabled":reminder,"reminder_offset_min":offset,"deleted":false,"can_self_cancel":seconds>=270*60,"is_booked":my_status.as_deref()==Some("booked"),"is_waitlisted":my_status.as_deref()==Some("waitlist"),"is_pending":my_status.as_deref()==Some("pending"),"is_past":seconds<=0,"seconds_left":seconds,"cancel_lock_minutes":270,"ics_token":auth::issue_scoped_token(&profiles.bot_token,"ics",id,viewer,now,86_400),"coach":coach,"participants":participants}));
+        trainings.push(json!({"id":id,"title":title,"type":training_type,"start_at":start,"date":local.format("%Y-%m-%d").to_string(),"time":local.format("%H:%M").to_string(),"datetime_local":local.format("%d.%m.%Y %H:%M").to_string(),"duration_min":duration,"capacity":capacity,"level":level,"booked_count":count,"waitlist_count":waitlist_count,"reminder_enabled":reminder,"reminder_offset_min":offset,"deleted":false,"can_self_cancel":seconds>=270*60,"is_booked":my_status==Some("booked"),"is_waitlisted":my_status==Some("waitlist"),"is_pending":my_status==Some("pending"),"is_past":seconds<=0,"seconds_left":seconds,"cancel_lock_minutes":270,"ics_token":auth::issue_scoped_token(&profiles.bot_token,"ics",id,viewer,now,86_400),"coach":coach,"participants":participants}));
     }
     Ok(json!({"ok":true,"trainings":trainings}))
 }
@@ -260,6 +281,36 @@ pub fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schedule_groups_bookings_and_preserves_anonymity() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute_batch("INSERT INTO users(telegram_id,first_name,display_mode,created_at) VALUES(42,'Viewer','name',0),(2,'Secret','animal',0),(3,'Coach','name',0),(4,'Waiter','name',0); INSERT INTO trainings(id,title,training_type,start_at,capacity,created_by,created_at) VALUES(7,'First','Test',1001000,4,3,0),(8,'Second','Test',1002000,4,3,0); INSERT INTO bookings(training_id,user_id,status,position,created_at) VALUES(7,42,'pending',0,0),(7,2,'booked',0,0),(7,4,'waitlist',1,0),(8,42,'booked',0,0);").unwrap();
+        let profiles = Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "123456:TEST-TOKEN".into(),
+            owner: 123,
+            timezone: chrono_tz::Europe::Moscow,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            )),
+        };
+        let signed = "auth_date=1000000&query_id=AA&user=%7B%22id%22%3A42%2C%22first_name%22%3A%22%5Cu0418%5Cu0432%5Cu0430%5Cu043d%22%7D&signature=telegram-signature&hash=aad77d89362a2d2634adf06dc7e3e3ac1d2043c386ebe89bc420769fcd8ef362";
+        let cards = list(&profiles, signed, 1_000_000, 7, profiles.timezone).unwrap();
+        let first = &cards["trainings"][0];
+        let second = &cards["trainings"][1];
+        assert_eq!(first["is_pending"], true);
+        assert_eq!(first["waitlist_count"], 1);
+        assert_eq!(first["participants"].as_array().unwrap().len(), 1);
+        assert_eq!(first["participants"][0]["anonymous"], true);
+        assert_ne!(first["participants"][0]["first_name"], "Secret");
+        assert_eq!(first["coach"]["first_name"], "Coach");
+        assert_eq!(second["is_booked"], true);
+        assert_eq!(second["participants"][0]["is_me"], true);
+        assert_eq!(second["waitlist_count"], 0);
+    }
     #[test]
     fn date_window_matches_python_zoneinfo_across_dst() {
         // Reference values from Python datetime + timedelta(days=1).
