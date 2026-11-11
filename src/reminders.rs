@@ -22,6 +22,15 @@ struct Due {
     duration: i64,
     capacity: i64,
     training_type: String,
+    offset: i64,
+}
+fn still_due(
+    db: &rusqlite::Connection,
+    event: &Due,
+    user: i64,
+    now: i64,
+) -> Result<bool, ReminderError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM trainings t JOIN bookings b ON b.training_id=t.id JOIN users u ON u.telegram_id=b.user_id WHERE t.id=?1 AND t.start_at=?2 AND t.duration_min=?3 AND t.capacity=?4 AND t.training_type=?5 AND t.reminder_offset_min=?6 AND t.reminder_enabled=1 AND t.reminder_sent=0 AND t.deleted_at IS NULL AND t.start_at>?7 AND t.start_at-t.reminder_offset_min*60<=?7 AND b.user_id=?8 AND b.status='booked' AND u.notifications_enabled=1 AND u.notify_trainings=1 AND NOT EXISTS(SELECT 1 FROM reminder_deliveries d WHERE d.training_id=t.id AND d.user_id=b.user_id))",params![event.id,event.start,event.duration,event.capacity,event.training_type,event.offset,now,user],|r|r.get(0)).map_err(|_|ReminderError::Database)
 }
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -55,7 +64,7 @@ pub async fn run_tick<S: ReminderSender>(
 ) -> Result<TickReport, ReminderError> {
     let due = {
         let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        let mut stmt=db.prepare("SELECT id,start_at,duration_min,capacity,training_type FROM trainings WHERE reminder_enabled=1 AND reminder_sent=0 AND deleted_at IS NULL AND start_at>?1 AND start_at-reminder_offset_min*60<=?1 ORDER BY id").map_err(|_|ReminderError::Database)?;
+        let mut stmt=db.prepare("SELECT id,start_at,duration_min,capacity,training_type,reminder_offset_min FROM trainings WHERE reminder_enabled=1 AND reminder_sent=0 AND deleted_at IS NULL AND start_at>?1 AND start_at-reminder_offset_min*60<=?1 ORDER BY id").map_err(|_|ReminderError::Database)?;
         let rows = stmt
             .query_map([now], |r| {
                 Ok(Due {
@@ -64,6 +73,7 @@ pub async fn run_tick<S: ReminderSender>(
                     duration: r.get(2)?,
                     capacity: r.get(3)?,
                     training_type: r.get(4)?,
+                    offset: r.get(5)?,
                 })
             })
             .map_err(|_| ReminderError::Database)?;
@@ -83,10 +93,25 @@ pub async fn run_tick<S: ReminderSender>(
         };
         let text = message(&event, profiles.timezone)?;
         for user in recipients {
+            {
+                let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
+                if !still_due(&db, &event, user, now)? {
+                    continue;
+                }
+            }
             match sender.send(user, &text).await {
                 Ok(message_id) => {
                     let mut db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
                     let tx = db.transaction().map_err(|_| ReminderError::Database)?;
+                    if !still_due(&tx, &event, user, now)? {
+                        // The message was already sent, but a concurrent edit or
+                        // cancellation made it stale. Track it for cleanup without
+                        // recording a delivery for the new state of the event.
+                        tx.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at,sent_at) VALUES('notice',?1,?2,?2,?1,?3,?4,?4,?4) ON CONFLICT(kind,entity_id,chat_id,user_id) DO UPDATE SET message_id=excluded.message_id,text=excluded.text,updated_at=excluded.updated_at,delete_at=excluded.delete_at",params![message_id,user,text,now]).map_err(|_|ReminderError::Database)?;
+                        tx.commit().map_err(|_| ReminderError::Database)?;
+                        report.failed += 1;
+                        continue;
+                    }
                     let deadline = (event.start + event.duration * 60 + 14400).min(now + 47 * 3600);
                     tx.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at,phase,sent_at,final_at) VALUES('training_reminder',?1,?2,?2,?3,?4,?5,?6,'',?5,NULL) ON CONFLICT(kind,entity_id,chat_id,user_id) DO UPDATE SET message_id=excluded.message_id,text=excluded.text,updated_at=excluded.updated_at,delete_at=CASE WHEN event_notifications.message_id=excluded.message_id AND event_notifications.delete_at IS NOT NULL AND excluded.delete_at IS NOT NULL THEN MIN(event_notifications.delete_at,excluded.delete_at) ELSE excluded.delete_at END,phase=excluded.phase,sent_at=CASE WHEN event_notifications.message_id=excluded.message_id THEN event_notifications.sent_at ELSE excluded.sent_at END,final_at=excluded.final_at",params![event.id,user,message_id,text,now,deadline]).map_err(|_|ReminderError::Database)?;
                     tx.execute("INSERT OR IGNORE INTO reminder_deliveries(training_id,user_id) VALUES(?1,?2)",params![event.id,user]).map_err(|_|ReminderError::Database)?;
@@ -97,7 +122,7 @@ pub async fn run_tick<S: ReminderSender>(
             }
         }
         let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        db.execute("UPDATE trainings SET reminder_sent=1 WHERE id=?1 AND reminder_enabled=1 AND reminder_sent=0 AND deleted_at IS NULL AND start_at=?2 AND NOT EXISTS(SELECT 1 FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status='booked' AND u.notifications_enabled=1 AND u.notify_trainings=1 AND NOT EXISTS(SELECT 1 FROM reminder_deliveries d WHERE d.training_id=b.training_id AND d.user_id=b.user_id))",params![event.id,event.start]).map_err(|_|ReminderError::Database)?;
+        db.execute("UPDATE trainings SET reminder_sent=1 WHERE id=?1 AND reminder_enabled=1 AND reminder_sent=0 AND deleted_at IS NULL AND start_at=?2 AND reminder_offset_min=?3 AND duration_min=?4 AND capacity=?5 AND training_type=?6 AND NOT EXISTS(SELECT 1 FROM bookings b JOIN users u ON u.telegram_id=b.user_id WHERE b.training_id=?1 AND b.status='booked' AND u.notifications_enabled=1 AND u.notify_trainings=1 AND NOT EXISTS(SELECT 1 FROM reminder_deliveries d WHERE d.training_id=b.training_id AND d.user_id=b.user_id))",params![event.id,event.start,event.offset,event.duration,event.capacity,event.training_type]).map_err(|_|ReminderError::Database)?;
     }
     Ok(report)
 }
@@ -147,6 +172,83 @@ mod tests {
         telegram::{ReminderSender, TelegramError},
     };
     use std::sync::{Arc, Mutex};
+    #[tokio::test]
+    async fn concurrent_reminder_change_does_not_mark_new_schedule_delivered() {
+        struct ChangeDuringSend {
+            db: Arc<Mutex<rusqlite::Connection>>,
+            calls: Mutex<usize>,
+        }
+        impl ReminderSender for ChangeDuringSend {
+            async fn send(&self, _: i64, _: &str) -> Result<i64, TelegramError> {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                if *calls == 1 {
+                    self.db
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE trainings SET reminder_offset_min=1,reminder_sent=0 WHERE id=7",
+                            [],
+                        )
+                        .unwrap();
+                }
+                Ok(100 + *calls as i64)
+            }
+        }
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        db.execute_batch("INSERT INTO users(telegram_id,first_name,created_at) VALUES(1,'Player',0); INSERT INTO trainings(id,title,training_type,start_at,capacity,reminder_offset_min,created_at) VALUES(7,'x','Test',2000,1,20,0); INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(7,1,'booked',0);").unwrap();
+        let profiles = Profiles {
+            db: Arc::new(Mutex::new(db)),
+            bot_token: "test".into(),
+            owner: 1,
+            timezone: chrono_tz::UTC,
+            require_event_approval: false,
+            phone_required_from: None,
+            booking_limiter: Arc::new(Mutex::new(crate::rate_limit::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ))),
+        };
+        let sender = ChangeDuringSend {
+            db: profiles.db.clone(),
+            calls: Mutex::new(0),
+        };
+        assert_eq!(
+            run_tick(&profiles, &sender, 1000).await.unwrap(),
+            TickReport { sent: 0, failed: 1 }
+        );
+        {
+            let db = profiles.db.lock().unwrap();
+            let sent: i64 = db
+                .query_row("SELECT reminder_sent FROM trainings WHERE id=7", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let deliveries: i64 = db
+                .query_row("SELECT count(*) FROM reminder_deliveries", [], |r| r.get(0))
+                .unwrap();
+            let stale:i64=db.query_row("SELECT count(*) FROM event_notifications WHERE kind='notice' AND message_id=101 AND delete_at=1000",[],|r|r.get(0)).unwrap();
+            assert_eq!((sent, deliveries, stale), (0, 0, 1));
+        }
+        assert_eq!(
+            run_tick(&profiles, &sender, 1001).await.unwrap(),
+            TickReport { sent: 0, failed: 0 }
+        );
+        assert_eq!(
+            run_tick(&profiles, &sender, 1940).await.unwrap(),
+            TickReport { sent: 1, failed: 0 }
+        );
+        let db = profiles.db.lock().unwrap();
+        let delivery: i64 = db
+            .query_row(
+                "SELECT count(*) FROM reminder_deliveries WHERE training_id=7 AND user_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(delivery, 1);
+    }
     #[derive(Default)]
     struct Fake {
         calls: Mutex<Vec<(i64, String)>>,
