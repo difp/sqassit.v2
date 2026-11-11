@@ -6,3 +6,4 @@ pub mod booking;
 pub mod identity;
 pub mod rate_limit;
 pub mod storage;
+pub mod web;

@@ -12,3 +12,11 @@ sha2 = "0.10"
 form_urlencoded = "1"
 rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
 unicode-casefold = "0.2.0"
+axum = "0.8.9"
+tokio = { version = "1.54.1", features = ["full"] }
+minijinja = { version = "3.1.0", features = ["builtins"] }
+tower-http = { version = "0.7.1", features = ["fs"] }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }
