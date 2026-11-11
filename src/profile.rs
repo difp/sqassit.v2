@@ -22,6 +22,7 @@ pub struct Profiles {
 pub enum ProfileError {
     Unauthorized(&'static str),
     Forbidden(&'static str),
+    NotFound(&'static str),
     Storage,
     Invalid(&'static str),
     Rule(u16, &'static str),
@@ -158,6 +159,28 @@ impl Profiles {
                 "avatar_url":self.avatar_url(id, file.as_deref(), true, now),"about":r.get::<_,String>(8)?,"display_mode":r.get::<_,String>(9)?,"show_username":r.get::<_,bool>(10)?,"onboarding_seen":r.get::<_,bool>(11)?,"animal":{"emoji":emoji,"name":name}
             }}))
         }).map_err(|_| ProfileError::Storage)
+    }
+    pub fn public_profile(&self, init: &str, token: &str, now: i64) -> Result<Value, ProfileError> {
+        let (viewer, user) = self.user_id(init, now)?;
+        let db = self.db.lock().map_err(|_| ProfileError::Storage)?;
+        self.register(&db, viewer, &user, now)?;
+        let target = auth::verify_scoped_token(&self.bot_token, token, "profile", 0, now).ok_or(
+            ProfileError::Unauthorized("Ссылка на профиль недействительна."),
+        )?;
+        let coach = viewer == self.owner
+            || db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM coaches WHERE telegram_id=?1)",
+                    [viewer],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(|_| ProfileError::Storage)?;
+        db.query_row("SELECT first_name,avatar_file_id,display_mode,about,username,show_username FROM users WHERE telegram_id=?1",[target],|r|{
+            let name:Option<String>=r.get(0)?;let file:Option<String>=r.get(1)?;let mode:String=r.get(2)?;let about:String=r.get(3)?;let username:Option<String>=r.get(4)?;let visible:bool=r.get(5)?;
+            let anonymous=mode=="animal";let (emoji,animal_name)=identity::animal_identity(target);
+            let (display,avatar,avatar_emoji)=if anonymous{(animal_name.to_owned(),String::new(),emoji)}else{(name.filter(|s|!s.is_empty()).unwrap_or_else(||"Игрок".into()),self.avatar_url(target,file.as_deref(),false,now),"")};
+            Ok(json!({"ok":true,"profile":{"first_name":display,"avatar_url":avatar,"avatar_emoji":avatar_emoji,"anonymous":anonymous,"profile_token":auth::issue_scoped_token(&self.bot_token,"profile",0,target,now,86400),"about":about,"username":username.filter(|s|!s.is_empty() && (visible||coach)),"username_visible":visible}}))
+        }).optional().map_err(|_|ProfileError::Storage)?.ok_or(ProfileError::NotFound("Профиль не найден."))
     }
     pub fn onboarding(&self, init: &str, now: i64) -> Result<Value, ProfileError> {
         let (id, user) = self.user_id(init, now)?;

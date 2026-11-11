@@ -115,6 +115,7 @@ where
     let init = init_data(&headers);
     match tokio::task::spawn_blocking(move || operation(profiles, init, now())).await {
         Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(crate::profile::ProfileError::NotFound(message))) => (StatusCode::NOT_FOUND,Json(json!({"detail":message}))).into_response(),
         Ok(Err(crate::profile::ProfileError::Forbidden(message))) => (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response(),
         Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
             (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
@@ -145,6 +146,16 @@ where
 }
 async fn api_me(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| p.me(&i, n)).await
+}
+async fn api_public_profile(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        p.public_profile(&i, &token, n)
+    })
+    .await
 }
 async fn api_onboarding(State(state): State<WebState>, headers: HeaderMap) -> Response {
     profile_work(state, headers, |p, i, n| p.onboarding(&i, n)).await
@@ -186,6 +197,74 @@ async fn api_trainings(
         crate::trainings::list(&p, &i, n, query.days, p.timezone)
     })
     .await
+}
+#[derive(Default, serde::Deserialize)]
+struct CalendarQuery {
+    #[serde(default)]
+    token: String,
+    #[serde(default, rename = "initData")]
+    init_data: String,
+}
+async fn api_calendar(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(filename): Path<String>,
+    Query(query): Query<CalendarQuery>,
+) -> Response {
+    let Some(id) = filename
+        .strip_suffix(".ics")
+        .and_then(|v| v.parse::<i64>().ok())
+    else {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail":"Not Found"}))).into_response();
+    };
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    let allow_dev = state.allow_dev_init_data;
+    match tokio::task::spawn_blocking(move || {
+        crate::calendar::generate(
+            &profiles,
+            id,
+            &query.token,
+            &init,
+            &query.init_data,
+            allow_dev,
+            now(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(ics)) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "text/calendar; charset=utf-8".to_owned(),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"squash-{id}.ics\""),
+                ),
+            ],
+            ics,
+        )
+            .into_response(),
+        Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
+            (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
+        }
+        Ok(Err(crate::profile::ProfileError::NotFound(message))) => {
+            (StatusCode::NOT_FOUND, Json(json!({"detail":message}))).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail":"Внутренняя ошибка сервера"})),
+        )
+            .into_response(),
+    }
 }
 async fn api_book(
     State(state): State<WebState>,
@@ -419,7 +498,9 @@ pub fn router(
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
+        .route("/api/players/{token}", get(api_public_profile))
         .route("/api/trainings", get(api_trainings))
+        .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
         .route("/api/coach/pending", get(coach_pending))
         .route(
@@ -668,6 +749,124 @@ mod tests {
         assert_ne!(person["first_name"], "Секретное имя");
         assert_eq!(person["avatar_url"], "");
         assert!(person.get("telegram_id").is_none());
+        coach_db.lock().unwrap().execute("UPDATE users SET username='secret_handle',about='bio',show_username=0 WHERE telegram_id=314",[]).unwrap();
+        let ics_token =
+            crate::auth::issue_scoped_token("123456:TEST-TOKEN", "ics", 7, 42, now(), 86400);
+        let calendar_request = |uri: String, init: &str| {
+            Request::builder()
+                .uri(uri)
+                .header("x-init-data", init)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let calendar = app
+            .clone()
+            .oneshot(calendar_request(
+                format!("/calendar/7.ics?token={ics_token}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(calendar.status(), StatusCode::OK);
+        assert_eq!(
+            calendar.headers()[header::CONTENT_TYPE],
+            "text/calendar; charset=utf-8"
+        );
+        assert_eq!(
+            calendar.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"squash-7.ics\""
+        );
+        let body = to_bytes(calendar.into_body(), 65536).await.unwrap();
+        let ics = std::str::from_utf8(&body).unwrap();
+        assert!(ics.contains("UID:squash-training-7@squashbot\r\n"));
+        assert!(ics.contains("TRIGGER:-PT30M\r\n"));
+        assert!(ics.ends_with("END:VCALENDAR\r\n"));
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request(
+                    "/calendar/7.ics?token=bad".into(),
+                    &signed
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request("/calendar/7.ics".into(), ""))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request("/calendar/7.ics".into(), &signed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("initData", &signed)
+            .finish();
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request(format!("/calendar/7.ics?{query}"), ""))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let wrong =
+            crate::auth::issue_scoped_token("123456:TEST-TOKEN", "ics", 8, 42, now(), 86400);
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request(
+                    format!("/calendar/7.ics?token={wrong}"),
+                    ""
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let missing =
+            crate::auth::issue_scoped_token("123456:TEST-TOKEN", "ics", 999, 42, now(), 86400);
+        assert_eq!(
+            app.clone()
+                .oneshot(calendar_request(
+                    format!("/calendar/999.ics?token={missing}"),
+                    ""
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let profile_token =
+            crate::auth::issue_scoped_token("123456:TEST-TOKEN", "profile", 0, 314, now(), 86400);
+        let profile_url = format!("/api/players/{profile_token}");
+        let (status, public) = send(app.clone(), "GET", &profile_url, &signed, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(public["profile"]["anonymous"], true);
+        assert_eq!(public["profile"]["username"], serde_json::Value::Null);
+        assert!(public["profile"].get("telegram_id").is_none());
+        assert_ne!(public["profile"]["first_name"], "Секретное имя");
+        let (_, coach_view) = send(coach_app.clone(), "GET", &profile_url, &signed, "").await;
+        assert_eq!(coach_view["profile"]["username"], "secret_handle");
+        assert_eq!(
+            send(app.clone(), "GET", "/api/players/invalid", &signed, "")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(app.clone(), "GET", &profile_url, "", "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
         let (status, booking) =
             send(app.clone(), "POST", "/api/trainings/7/book", &signed, "").await;
         assert_eq!(status, StatusCode::OK);

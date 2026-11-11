@@ -5,6 +5,7 @@ pub mod auth;
 pub mod booking;
 pub mod bot;
 pub mod bot_slots;
+pub mod calendar;
 pub mod coach;
 pub mod coach_participants;
 pub mod identity;
