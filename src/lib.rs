@@ -22,6 +22,7 @@ pub mod messages;
 pub mod profile;
 pub mod rate_limit;
 pub mod reminders;
+pub mod room;
 pub mod storage;
 pub mod telegram;
 pub mod trainings;

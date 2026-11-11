@@ -79,16 +79,7 @@ impl MatchApi {
         let code = if let Some(code) = existing {
             code
         } else {
-            let mut bytes = [0_u8; 8];
-            getrandom::getrandom(&mut bytes).map_err(|_| ProfileError::Storage)?;
-            const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-            let code = format!(
-                "SQ-{}",
-                bytes
-                    .iter()
-                    .map(|b| char::from(ALPHABET[(b & 31) as usize]))
-                    .collect::<String>()
-            );
+            let code = crate::room::new_code()?;
             tx.execute(
                 "UPDATE matches SET room_code=?1 WHERE id=?2 AND room_code IS NULL",
                 params![code, id],

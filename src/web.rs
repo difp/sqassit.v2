@@ -495,6 +495,16 @@ async fn api_book(
     })
     .await
 }
+async fn training_room(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::room::training(&p, &i, n, id)
+    })
+    .await
+}
 async fn match_join(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1112,6 +1122,7 @@ pub fn router(
             axum::routing::delete(coach_purge),
         )
         .route("/api/trainings/{id}/book", post(api_book))
+        .route("/api/trainings/{id}/room", post(training_room))
         .route("/api/trainings/{id}/cancel", post(api_cancel))
         .route("/api/me/onboarding", post(api_onboarding))
         .route("/api/me/profile", put(api_update_profile))
@@ -1573,6 +1584,29 @@ mod tests {
             let b = to_bytes(r.into_body(), 65536).await.unwrap();
             (status, serde_json::from_slice(&b).unwrap())
         }
+        coach_db.lock().unwrap().execute("INSERT INTO trainings(id,title,start_at,created_at,created_by) VALUES(900,'Room',?1,0,777)",[now()+3600]).unwrap();
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/900/room", &signed, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        coach_db.lock().unwrap().execute("INSERT INTO bookings(training_id,user_id,status,created_at) VALUES(900,42,'pending',0)",[]).unwrap();
+        let (_, room) = send(app.clone(), "POST", "/api/trainings/900/room", &signed, "").await;
+        assert!(room["code"].as_str().unwrap().starts_with("SQ-"));
+        let (_, same) = send(app.clone(), "POST", "/api/trainings/900/room", &signed, "").await;
+        assert_eq!(room["code"], same["code"]);
+        coach_db
+            .lock()
+            .unwrap()
+            .execute("UPDATE trainings SET deleted_at=1 WHERE id=900", [])
+            .unwrap();
+        assert_eq!(
+            send(app.clone(), "POST", "/api/trainings/900/room", &signed, "")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
         let batch = r#"{"period_start":"2099-01-01","period_end":"2099-01-07","weekdays":[0,2,4],"time":"19:00","training_type":"Batch","capacity":2}"#;
         let path = "/api/coach/trainings/batch";
         assert_eq!(
