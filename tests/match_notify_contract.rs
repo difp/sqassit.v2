@@ -95,7 +95,7 @@ async fn same_match_notifications_as_python() {
         "INSERT INTO users(telegram_id,first_name,display_mode,notifications_enabled,notify_matches,created_at) VALUES \
          (1,'Owner','name',1,1,{now}),(2,'Player Two','name',1,1,{now}),(3,'Leaver','name',1,1,{now}),\
          (4,'Quiet','name',0,0,{now}),(5,'Coauthor','name',1,1,{now}),(6,'Pending','name',1,1,{now}),\
-         (7,'Requester','name',1,1,{now}); \
+         (7,'Requester','name',1,1,{now}),(8,'Rejected','name',1,1,{now}); \
          INSERT INTO matches(id,title,location,start_at,duration_min,max_players,created_by,created_at) \
          VALUES(1,'Cup <A&B>','Court & 1',{},60,4,1,{now}); \
          INSERT INTO match_players(match_id,user_id,status,created_at) VALUES \
@@ -104,6 +104,10 @@ async fn same_match_notifications_as_python() {
          VALUES(2,'Promo','Hall',{},60,2,1,{now}); \
          INSERT INTO match_players(match_id,user_id,status,created_at) VALUES \
          (2,2,'booked',{}),(2,6,'pending',{}),(2,7,'waitlist',{}); \
+         INSERT INTO matches(id,title,location,start_at,duration_min,max_players,created_by,created_at) \
+         VALUES(3,'Reject','Hall',{},60,2,1,{now}); \
+         INSERT INTO match_players(match_id,user_id,status,created_at) VALUES \
+         (3,2,'booked',{}),(3,8,'pending',{}); \
          INSERT INTO event_coauthors(event_type,event_id,user_id,added_by,created_at) \
          VALUES('match',1,5,1,{now});",
         now + 7200,
@@ -113,7 +117,10 @@ async fn same_match_notifications_as_python() {
         now + 7200,
         now + 50,
         now + 60,
-        now + 70
+        now + 70,
+        now + 7200,
+        now + 80,
+        now + 90
     ))
     .unwrap();
     let profiles = Profiles {
@@ -246,6 +253,29 @@ async fn same_match_notifications_as_python() {
         .await
         .expect("match leave/promotion notification");
     }
+    {
+        let db = profiles.db.lock().unwrap();
+        db.execute(
+            "UPDATE match_players SET status='rejected' WHERE match_id=3 AND user_id=8",
+            [],
+        )
+        .unwrap();
+    }
+    sqassit::match_notify::notify(
+        &profiles,
+        &fake,
+        &sqassit::event_notify::EventNotifier::default(),
+        sqassit::match_notify::MatchChange {
+            base: "https://example.test",
+            id: 3,
+            user: 8,
+            status: "rejected",
+            change: sqassit::match_notify::Change::Event,
+            now,
+        },
+    )
+    .await
+    .expect("match rejection notification");
 
     assert_eq!(
         json!(fake.calls.lock().unwrap().clone()),
@@ -284,6 +314,9 @@ async fn same_match_notifications_as_python() {
         (2, 2, now + 25_200),
         (2, 6, now + 25_200),
         (2, 7, now + 25_200),
+        (3, 1, now + 25_200),
+        (3, 2, now + 25_200),
+        (3, 8, now + 25_200),
     ];
     assert_eq!(deadlines.len(), expected_deadlines.len());
     for ((entity, chat, deadline), (expected_entity, expected_chat, expected)) in

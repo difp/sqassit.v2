@@ -55,8 +55,8 @@ async def run():
                 "(1,'Owner','name',1,1,?),(2,'Player Two','name',1,1,?),"
                 "(3,'Leaver','name',1,1,?),(4,'Quiet','name',0,0,?),"
                 "(5,'Coauthor','name',1,1,?),(6,'Pending','name',1,1,?),"
-                "(7,'Requester','name',1,1,?)",
-                (now, now, now, now, now, now, now),
+                "(7,'Requester','name',1,1,?),(8,'Rejected','name',1,1,?)",
+                (now, now, now, now, now, now, now, now),
             )
             await db._execute(
                 "INSERT INTO matches(id,title,location,start_at,duration_min,max_players,"
@@ -77,6 +77,16 @@ async def run():
                 "INSERT INTO match_players(match_id,user_id,status,created_at) VALUES "
                 "(2,2,'booked',?),(2,6,'pending',?),(2,7,'waitlist',?)",
                 (now + 50, now + 60, now + 70),
+            )
+            await db._execute(
+                "INSERT INTO matches(id,title,location,start_at,duration_min,max_players,"
+                "created_by,created_at) VALUES (3,'Reject','Hall',?,60,2,1,?)",
+                (now + 7200, now),
+            )
+            await db._execute(
+                "INSERT INTO match_players(match_id,user_id,status,created_at) VALUES "
+                "(3,2,'booked',?),(3,8,'pending',?)",
+                (now + 80, now + 90),
             )
             await db._execute(
                 "INSERT INTO event_coauthors(event_type,event_id,user_id,added_by,created_at) "
@@ -106,6 +116,11 @@ async def run():
             match = await db.get_match(2)
             await main._notify_match_event(match, 2, "left")
             await main._notify_match_event(match, 7, "promoted")
+            await db._execute(
+                "UPDATE match_players SET status='rejected' WHERE match_id=3 AND user_id=8"
+            )
+            match = await db.get_match(3)
+            await main._notify_match_event(match, 8, "rejected")
             notifications = await db._fetchall(
                 "SELECT kind,entity_id,chat_id,user_id,message_id,text "
                 "FROM event_notifications ORDER BY chat_id,user_id"
