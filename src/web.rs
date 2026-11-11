@@ -1,10 +1,10 @@
 //! Experimental HTTP shell for the migrated UI. The API and bot are unfinished.
 use axum::{
     extract::{Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post, put},
     Json, Router,
 };
 use minijinja::{context, Environment};
@@ -18,6 +18,7 @@ const TABS_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; s
 #[derive(Clone)]
 pub struct WebState {
     pub allow_dev_init_data: bool,
+    pub profiles: Option<crate::profile::Profiles>,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -80,6 +81,65 @@ async fn ready() -> (StatusCode, Json<serde_json::Value>) {
         Json(json!({"detail":"Rust migration is incomplete."})),
     )
 }
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+fn init_data(headers: &HeaderMap) -> String {
+    headers
+        .get("x-init-data")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned()
+}
+async fn profile_work<F>(state: WebState, headers: HeaderMap, operation: F) -> Response
+where
+    F: FnOnce(
+            crate::profile::Profiles,
+            String,
+            i64,
+        ) -> Result<serde_json::Value, crate::profile::ProfileError>
+        + Send
+        + 'static,
+{
+    let Some(profiles) = state.profiles else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail":"Profile service is not configured."})),
+        )
+            .into_response();
+    };
+    let init = init_data(&headers);
+    match tokio::task::spawn_blocking(move || operation(profiles, init, now())).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
+            (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail":"Внутренняя ошибка сервера"})),
+        )
+            .into_response(),
+    }
+}
+async fn api_me(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| p.me(&i, n)).await
+}
+async fn api_onboarding(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| p.onboarding(&i, n)).await
+}
+async fn api_notifications(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::profile::NotificationSettings>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        p.notifications(&i, n, payload)
+    })
+    .await
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -104,18 +164,26 @@ async fn headers(request: Request, next: Next) -> Response {
     response
 }
 
-pub fn router(static_path: PathBuf, allow_dev_init_data: bool) -> Router {
+pub fn router(
+    static_path: PathBuf,
+    allow_dev_init_data: bool,
+    profiles: Option<crate::profile::Profiles>,
+) -> Router {
     Router::new()
         .route("/", get(player))
         .route("/coach", get(coach))
         .route("/match", get(matches))
         .route("/tabs", get(tabs))
+        .route("/api/me", get(api_me))
+        .route("/api/me/onboarding", post(api_onboarding))
+        .route("/api/me/notifications", put(api_notifications))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .nest_service("/static", ServeDir::new(static_path))
         .layer(middleware::from_fn(headers))
         .with_state(WebState {
             allow_dev_init_data,
+            profiles,
         })
 }
 
@@ -137,7 +205,7 @@ mod tests {
         use axum::body::{to_bytes, Body};
         use tower::ServiceExt;
         let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static");
-        let app = router(static_dir, false);
+        let app = router(static_dir, false, None);
         for (url, status) in [
             ("/", StatusCode::OK),
             ("/coach", StatusCode::OK),
@@ -145,7 +213,7 @@ mod tests {
             ("/tabs", StatusCode::OK),
             ("/healthz", StatusCode::OK),
             ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
-            ("/api/me", StatusCode::NOT_FOUND),
+            ("/api/me", StatusCode::SERVICE_UNAVAILABLE),
             ("/static/telegram-web-app.js", StatusCode::OK),
         ] {
             let response = app
@@ -169,5 +237,90 @@ mod tests {
                 assert!(std::str::from_utf8(&body).unwrap().contains("incomplete"));
             }
         }
+    }
+    #[tokio::test]
+    async fn authenticated_profile_onboarding_and_notification_flow() {
+        use axum::body::{to_bytes, Body};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use tower::ServiceExt;
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut db).unwrap();
+        let profiles = crate::profile::Profiles {
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bot_token: "123456:TEST-TOKEN".into(),
+            owner: 123,
+        };
+        let app = router(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
+            false,
+            Some(profiles),
+        );
+        let timestamp = now().to_string();
+        let user = r#"{"id":42,"first_name":"Иван"}"#;
+        let data = format!("auth_date={timestamp}\nuser={user}");
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+        mac.update(b"123456:TEST-TOKEN");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&mac.finalize().into_bytes()).unwrap();
+        mac.update(data.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let signed = form_urlencoded::Serializer::new(String::new())
+            .append_pair("auth_date", &timestamp)
+            .append_pair("user", user)
+            .append_pair("hash", &signature)
+            .finish();
+        async fn send(
+            app: Router,
+            method: &str,
+            uri: &str,
+            token: &str,
+            body: &'static str,
+        ) -> (StatusCode, serde_json::Value) {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("x-init-data", token)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let r = app.oneshot(req).await.unwrap();
+            let status = r.status();
+            let b = to_bytes(r.into_body(), 65536).await.unwrap();
+            (status, serde_json::from_slice(&b).unwrap())
+        }
+        assert_eq!(
+            send(app.clone(), "GET", "/api/me", "", "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, body) = send(app.clone(), "GET", "/api/me", &signed, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["user"]["telegram_id"], 42);
+        assert_eq!(body["user"]["onboarding_seen"], false);
+        assert_eq!(body["user"]["notify_messages"], true);
+        assert_eq!(
+            send(app.clone(), "POST", "/api/me/onboarding", &signed, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, body) = send(
+            app.clone(),
+            "PUT",
+            "/api/me/notifications",
+            &signed,
+            r#"{"notify_messages":false}"#,
+        )
+        .await;
+        assert_eq!(body["notify_messages"], false);
+        assert_eq!(body["notify_matches"], true);
+        let (_, body) = send(app.clone(), "GET", "/api/me", &signed, "").await;
+        assert_eq!(body["user"]["onboarding_seen"], true);
+        assert_eq!(body["user"]["notify_messages"], false);
+        assert_eq!(
+            send(app, "GET", "/api/me", &signed.replace("42", "43"), "")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

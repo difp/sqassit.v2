@@ -156,10 +156,9 @@ mod tests {
         let barrier = Arc::new(Barrier::new(8));
         let workers: Vec<_> = (0..8)
             .map(|id| {
-                let path = path.clone();
+                let mut db = storage::open(&path).unwrap();
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
-                    let mut db = storage::open(path).unwrap();
                     barrier.wait();
                     book(&mut db, 1, id, 1, false, false, 1).unwrap()
                 })
