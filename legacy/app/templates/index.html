@@ -1,0 +1,745 @@
+{% extends "base.html" %}
+{% block header %}Тренировки{% endblock %}
+
+{% block content %}
+<!-- Профиль игрока + общий тумблер уведомлений -->
+<section class="card profile-card" id="profile">
+  <div class="profile-card__top">
+    <span class="avatar" id="me-avatar">…</span>
+    <div class="profile-card__text">
+      <div class="profile-card__name" id="me-name">Игрок</div>
+      <div class="profile-card__sub">Уведомления в боте</div>
+    </div>
+    <label class="switch">
+      <input id="notif-toggle" type="checkbox" aria-label="Уведомления в боте" disabled>
+      <span></span>
+    </label>
+  </div>
+  <div class="profile-card__about" id="me-about" hidden></div>
+</section>
+<div class="profile-actions">
+  <button class="btn btn--sm" id="profile-edit" type="button">Настроить профиль</button>
+  <button class="btn btn--sm" id="profile-msg" type="button">Написать тренеру</button>
+</div>
+<div style="height:18px"></div>
+
+<div id="loading" class="loading-state" role="status" aria-live="polite">
+  <span class="squash-loader" aria-hidden="true">
+    <svg class="squash-loader__ring" viewBox="0 0 44 44" fill="none">
+      <circle cx="22" cy="22" r="18" stroke="currentColor" stroke-opacity=".16" stroke-width="2"/>
+      <circle cx="22" cy="22" r="18" stroke="#ffd60a" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 89"/>
+    </svg>
+    <span class="squash-loader__ball">
+      <span class="squash-loader__dot"></span>
+      <span class="squash-loader__dot"></span>
+    </span>
+  </span>
+  <span>Загружаем расписание…</span>
+</div>
+
+<div id="empty" class="empty" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4.5" width="18" height="16" rx="3.5"/><path d="M8 2.8v3.4M16 2.8v3.4M3.2 9.5h17.6"/>
+  </svg>
+  <div>На ближайшие 7 дней тренировок нет</div>
+</div>
+
+<div id="schedule"></div>
+
+<section class="quote-card" aria-label="Цитата профессионального игрока">
+  <div class="quote-card__label">Цитата</div>
+  <blockquote id="training-quote"></blockquote>
+  <cite id="training-quote-author"></cite>
+</section>
+
+<!-- Bottom sheet: личное сообщение тренеру -->
+<div class="sheet" id="msg-sheet">
+  <div class="sheet__backdrop" data-msg-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="msg-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="msg-title">Чат с тренером</h2>
+    <p class="hint form-note">Личный чат. Виден только вам и тренеру.</p>
+    <div class="chat-log" id="msg-log"><div class="chat-empty">Загружаем переписку…</div></div>
+    <textarea class="input" id="msg-text" rows="3" maxlength="1000"
+              aria-label="Сообщение тренеру"
+              placeholder="Напишите тренеру…"></textarea>
+    <button class="btn btn--primary btn--block" id="msg-send" style="margin-top:12px">Отправить</button>
+  </div>
+</div>
+
+<!-- Bottom sheet: профиль, приватность и уведомления -->
+<div class="sheet" id="profile-sheet">
+  <div class="sheet__backdrop" data-profile-close></div>
+  <div class="sheet__panel sheet__panel--form" role="dialog" aria-modal="true" aria-labelledby="profile-sheet-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="profile-sheet-title" tabindex="-1">Настройки профиля</h2>
+    <div class="sheet__body">
+
+    <section class="settings-block" aria-labelledby="profile-about-title">
+      <h3 class="settings-block__title" id="profile-about-title">О себе</h3>
+      <label class="field"><span class="label">Коротко о вас</span>
+        <textarea class="input" id="profile-about" rows="4" maxlength="450"
+                  placeholder="Например: играю два года, хочу подтянуть подачу"></textarea>
+        <span class="hint hint--tight" id="profile-about-count">0 / 450</span></label>
+    </section>
+
+    <section class="settings-block" aria-labelledby="profile-phone-title">
+      <h3 class="settings-block__title" id="profile-phone-title">Телефон</h3>
+      <label class="field"><span class="label">Для связи с тренером</span>
+        <input class="input" id="profile-phone" type="tel" inputmode="tel"
+               maxlength="32" autocomplete="tel" placeholder="+7 999 123-45-67">
+        <span class="hint hint--tight">Виден только тренеру. Можно поделиться контактом через /phone в боте.</span></label>
+    </section>
+
+    <section class="settings-block" aria-labelledby="profile-privacy-title">
+      <h3 class="settings-block__title" id="profile-privacy-title">Приватность</h3>
+      <label class="field"><span class="label">Как показываться в списке участников</span>
+        <select class="input" id="profile-display">
+          <option value="name">Имя и фото из Telegram</option>
+          <option value="animal">Вымышленное животное</option>
+        </select></label>
+      <div class="settings-list">
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__title">Показывать @username</span>
+            <span class="setting-row__hint">По умолчанию скрыт от других игроков. Тренер видит ваш username всегда.</span>
+          </span>
+          <span class="switch">
+            <input id="profile-username" type="checkbox" aria-label="Показывать @username">
+            <span></span>
+          </span>
+        </label>
+      </div>
+      <p class="hint hint--tight form-note" id="profile-preview"></p>
+    </section>
+
+    <section class="settings-block" aria-labelledby="profile-notifications-title">
+      <h3 class="settings-block__title" id="profile-notifications-title">Уведомления</h3>
+      <div class="settings-list">
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__title">Все уведомления</span>
+            <span class="setting-row__hint">Общий переключатель сообщений от бота.</span>
+          </span>
+          <span class="switch">
+            <input id="profile-notify-all" type="checkbox" aria-label="Все уведомления">
+            <span></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__title">Новые матчи</span>
+            <span class="setting-row__hint">Лента матчей и изменения в ваших матчах.</span>
+          </span>
+          <span class="switch">
+            <input id="profile-notify-matches" type="checkbox" aria-label="Новые матчи">
+            <span></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__title">Тренировки</span>
+            <span class="setting-row__hint">Напоминания и изменения вашей записи.</span>
+          </span>
+          <span class="switch">
+            <input id="profile-notify-trainings" type="checkbox" aria-label="Тренировки">
+            <span></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__title">Сообщения</span>
+            <span class="setting-row__hint">Личные сообщения от тренера.</span>
+          </span>
+          <span class="switch">
+            <input id="profile-notify-messages" type="checkbox" aria-label="Сообщения">
+            <span></span>
+          </span>
+        </label>
+      </div>
+      <p class="hint hint--tight">Если общий переключатель выключен, бот не присылает уведомления выбранных тем.</p>
+    </section>
+    </div>
+    <div class="sheet__footer">
+      <button class="btn btn--primary btn--block" id="profile-save" type="button">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom sheet: памятка первого запуска -->
+<div class="sheet" id="onboarding-sheet">
+  <div class="sheet__backdrop" data-onboarding-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="onboarding-title">Как пользоваться</h2>
+
+    <div id="onboarding-guide">
+      <p class="hint" style="margin:-8px 0 16px">Коротко о главном — это займёт полминуты.</p>
+      <ul class="onboarding-list">
+        <li><b>Расписание.</b> Выберите тренировку на 7 дней вперёд и нажмите «Записаться».</li>
+        <li><b>Лист ожидания.</b> Если мест нет — встаньте в очередь: при освобождении места запись произойдёт автоматически.</li>
+        <li><b>Отмена.</b> Отменить запись можно не позже чем за 4,5 часа до начала.</li>
+        <li><b>Тренер.</b> Напишите ему из карточки тренировки или кнопкой «Написать тренеру».</li>
+      </ul>
+      <button class="btn btn--primary btn--block" id="onboarding-next" type="button">Дальше</button>
+      <button class="btn btn--block" id="onboarding-skip" type="button" style="margin-top:8px">Пропустить</button>
+    </div>
+
+    <div id="onboarding-privacy" hidden>
+      <p class="hint" style="margin:-8px 0 14px">
+        По умолчанию в расписании видны имя и фото из Telegram. Это можно изменить.
+      </p>
+      <div class="card card--compact" style="margin-bottom:14px">
+        <div class="reminder-row__text">Приватность</div>
+        <div class="hint" style="margin-top:4px">
+          Выберите вымышленное животное — тренер и другие игроки не увидят ваши имя и фото.
+          @username по умолчанию скрыт от других игроков; тренер видит его всегда.
+        </div>
+      </div>
+      <button class="btn btn--primary btn--block" id="onboarding-setup" type="button">Настроить приватность</button>
+      <button class="btn btn--block" id="onboarding-done" type="button" style="margin-top:8px">Оставить имя и фото</button>
+    </div>
+  </div>
+</div>
+<!-- Bottom sheet: кто записан на занятие -->
+<div class="sheet" id="participants-sheet">
+  <div class="sheet__backdrop" data-part-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="participants-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="participants-title">Участники</h2>
+    <p class="hint" id="participants-sub"></p>
+    <div id="participants-list"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ITEMS = {};
+
+function participantsLine(list, trainingId) {
+  if (!list.length) {
+    return '<div class="t-people"><span class="t-names">Пока никто не записан</span></div>';
+  }
+  const stack = '<span class="avatar-stack">' +
+    list.slice(0, 5).map(p =>
+      avatarHtml(p.first_name, p.avatar_url, true, p.avatar_emoji)).join('') + '</span>';
+  const names = list.map(p => esc(p.first_name)).join(', ');
+  // Вся строка — одна кнопка: имена внутри списка, а не отдельные ссылки.
+  return `<button type="button" class="t-people t-people--open" data-participants="${trainingId}"
+      aria-label="Участники: ${names}. Открыть список">
+    ${stack}<span class="t-names">${names}</span>
+    <svg class="t-people__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9 18l6-6-6-6"/>
+    </svg>
+  </button>`;
+}
+
+function coachHtml(c, trainingId) {
+  if (!c) return '';
+  // Без «о себе» строка остаётся одной: подпись «Написать» и так рядом.
+  const bio = c.bio ? `<div class="t-coach__bio">${esc(c.bio)}</div>` : '';
+  return `
+  <div class="t-coach" data-coach-msg="${trainingId}" role="button" tabindex="0">
+    ${avatarHtml(c.first_name, c.avatar_url, true)}
+    <div class="t-coach__text">
+      <div class="t-coach__name">Тренер · ${esc(c.first_name)}</div>
+      ${bio}
+    </div>
+    <span class="t-coach__action">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.1-3.3A8.4 8.4 0 1 1 21 11.5Z"/>
+      </svg>
+      Написать
+    </span>
+  </div>`;
+}
+
+function trainingCard(t) {
+  const free = Math.max(0, t.capacity - t.booked_count);
+
+  let badges = '';
+  if (t.is_booked) badges += '<span class="badge badge--success">Вы записаны</span>';
+  if (t.is_waitlisted) badges += '<span class="badge badge--warn">Лист ожидания</span>';
+  if (t.is_pending) badges += '<span class="badge badge--warn">Ожидает подтверждения</span>';
+  if (t.waitlist_count) badges += `<span class="badge badge--muted">В очереди: ${t.waitlist_count}</span>`;
+  if (t.is_past) badges += '<span class="badge badge--muted">Завершена</span>';
+  if (!t.is_past && !t.can_self_cancel && (t.is_booked || t.is_waitlisted)) {
+    badges += `<span class="badge badge--warn">Отмена недоступна — до старта ${esc(fmtDuration(t.seconds_left))}</span>`;
+  }
+
+  // На карточке одна главная кнопка: записаться или отменить запись.
+  // Календарь — второстепенное действие в том же ряду.
+  const canBook = !t.is_past && !t.is_booked && !t.is_waitlisted && !t.is_pending;
+  const canCancel = !t.is_past && t.can_self_cancel && (t.is_booked || t.is_waitlisted || t.is_pending);
+  const buttons = [];
+  if (canCancel) {
+    const label = t.is_pending ? 'Отменить заявку' : 'Отменить запись';
+    buttons.push(`<button class="btn btn--danger" data-cancel="${t.id}">${label}</button>`);
+  } else if (canBook) {
+    const label = free > 0 ? 'Записаться' : 'В лист ожидания';
+    buttons.push(`<button class="btn btn--primary" data-book="${t.id}">${label}</button>`);
+  }
+  if (!t.is_past) {
+    buttons.push(`<button class="btn${buttons.length ? '' : ' btn--primary'}" data-cal="${t.id}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4.5" width="18" height="16" rx="3.5"/>
+        <path d="M8 2.8v3.4M16 2.8v3.4M3.2 9.5h17.6M12 12.7v5M9.5 15.2h5"/>
+      </svg>
+      В календарь
+    </button>`);
+  }
+  const action = buttons.length ? `<div class="t-actions">${buttons.join('')}</div>` : '';
+  // Турнир доступен тем, кто в записи: состав сетки — записавшиеся.
+  const showTournament = t.is_booked || t.is_waitlisted || t.is_pending;
+
+  return `
+  <div class="card">
+    <div class="t-top">
+      <div class="t-time">${esc(t.time)}</div>
+      <div class="t-occ"><b>${t.booked_count}</b> из ${t.capacity} мест</div>
+    </div>
+    <div class="t-title">${esc(t.type)}</div>
+    <div class="t-meta">
+      <span>${t.duration_min} мин</span>
+      ${t.level ? levelPill(t.level) : ''}
+    </div>
+    ${badges ? `<div class="t-badges">${badges}</div>` : ''}
+    ${participantsLine(t.participants, t.id)}
+    ${coachHtml(t.coach, t.id)}
+    ${action}
+    ${showTournament ? tournamentRow(t.id) : ''}
+  </div>`;
+}
+
+function renderSchedule(trainings) {
+  const loading = document.getElementById('loading');
+  loading.hidden = true;
+  const schedule = document.getElementById('schedule');
+  const empty = document.getElementById('empty');
+
+  // Старые карточки и ITEMS не должны оставаться после обновления:
+  // иначе удалённая тренировка всё ещё открывается из кэша.
+  Object.keys(ITEMS).forEach(key => delete ITEMS[key]);
+  if (!trainings.length) {
+    schedule.innerHTML = '';
+    empty.hidden = false;
+    hideAppLoader();
+    return;
+  }
+  empty.hidden = true;
+
+  const groups = {};
+  trainings.forEach(t => { ITEMS[t.id] = t; (groups[t.date] = groups[t.date] || []).push(t); });
+
+  schedule.innerHTML = Object.keys(groups).sort().map(date => {
+    const d = dayLabelParts(date);
+    return `
+    <section class="day">
+      <div class="day-label"><span>${esc(d.rel)}</span><span>${esc(d.date)}</span></div>
+      ${groups[date].map(trainingCard).join('')}
+    </section>`;
+  }).join('');
+  hideAppLoader();
+}
+
+async function loadSchedule() {
+  const cached = cacheRead('schedule');
+  if (cached) {
+    // Показываем прошлый снимок сразу, свежие данные догружаем следом.
+    renderSchedule(cached);
+  }
+  try {
+    const data = await api('/api/trainings?days=7');
+    cacheWrite('schedule', data.trainings);
+    renderSchedule(data.trainings);
+  } catch (e) {
+    if (!cached) document.getElementById('loading').hidden = true;
+    toast(e.message, { label: 'Повторить', onClick: loadSchedule });
+  }
+}
+
+async function loadProfile() {
+  await APP.ready;
+  if (!APP.me) return;
+  document.getElementById('me-name').textContent = APP.me.first_name || 'Игрок';
+  const avatar = document.getElementById('me-avatar');
+  if (avatar) {
+    avatar.outerHTML = avatarHtml(
+      APP.me.first_name, APP.me.avatar_url, false, '', 'me-avatar'
+    );
+  }
+  const toggle = document.getElementById('notif-toggle');
+  toggle.disabled = false;
+  syncNotificationControls();
+  paintProfile();
+}
+
+document.getElementById('notif-toggle').addEventListener('change', async (ev) => {
+  const target = ev.target;
+  try {
+    await api('/api/me/notifications', 'PUT', { enabled: target.checked });
+    if (APP.me) APP.me.notifications_enabled = target.checked;
+    syncNotificationControls();
+    hapticNotify('success');
+    toast(target.checked ? 'Уведомления включены' : 'Уведомления выключены');
+  } catch (e) {
+    target.checked = !target.checked;
+    syncNotificationControls();
+    hapticNotify('error');
+    toast(e.message);
+  }
+});
+
+document.getElementById('schedule').addEventListener('click', async (ev) => {
+  const partId = ev.target.closest('[data-participants]')?.getAttribute('data-participants');
+  if (partId) { openParticipants(parseInt(partId, 10)); return; }
+  const tournamentId = ev.target.closest('[data-tournament]')?.getAttribute('data-tournament');
+  if (tournamentId) { openTrainingTournament(tournamentId); return; }
+  const profileToken = ev.target.closest('[data-profile-token]')?.getAttribute('data-profile-token');
+  if (profileToken) { openPlayerProfile(profileToken); return; }
+  const bookId = ev.target.closest('[data-book]')?.getAttribute('data-book');
+  const cancelId = ev.target.closest('[data-cancel]')?.getAttribute('data-cancel');
+  const calId = ev.target.closest('[data-cal]')?.getAttribute('data-cal');
+  const linkUrl = ev.target.closest('[data-link-url]')?.getAttribute('data-link-url');
+  if (linkUrl) { openExternal(linkUrl); return; }
+  const coachMsg = ev.target.closest('[data-coach-msg]');
+  if (coachMsg) { openMsg(parseInt(coachMsg.getAttribute('data-coach-msg'), 10)); return; }
+  if (calId) {
+    const t = ITEMS[calId];
+    if (t) openCalendar(t.id, t.type, t.start_at, t.duration_min, t.ics_token);
+    return;
+  }
+  if (!bookId && !cancelId) return;
+  haptic('medium');
+  try {
+    if (bookId) {
+      const r = await api(`/api/trainings/${bookId}/book`, 'POST');
+      hapticNotify('success');
+      toast(r.message || 'Готово');
+    } else {
+      const r = await api(`/api/trainings/${cancelId}/cancel`, 'POST');
+      hapticNotify('success');
+      toast(r.promoted ? 'Отменено. Следующий из очереди повышен.' : 'Заявка отменена');
+    }
+    cacheClear();
+    await loadSchedule();
+  } catch (e) {
+    hapticNotify('error');
+    if (e.status === 403 && /телефон/i.test(e.message)) {
+      openProfile();
+    }
+    toast(e.message);
+  }
+});
+
+// ===== Турнир занятия =====
+async function openTrainingTournament(id) {
+  const btn = document.querySelector(`[data-tournament="${id}"]`);
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api(`/api/trainings/${id}/room`, 'POST');
+    const t = ITEMS[id];
+    const names = t && Array.isArray(t.participants) ? t.participants.map(p => p.first_name) : [];
+    openTournamentRoom(d.code, names);
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ===== Кто записан на занятие =====
+// Игрок видит полный список, а не только аватарки в карточке.
+const participantsSheet = document.getElementById('participants-sheet');
+const participantsList = document.getElementById('participants-list');
+const participantsSub = document.getElementById('participants-sub');
+
+function openParticipants(id) {
+  const t = ITEMS[id];
+  if (!t) return;
+  const wait = t.waitlist_count || 0;
+  participantsSub.textContent =
+    `${t.participants.length} из ${t.capacity} мест` + (wait ? ` · в очереди: ${wait}` : '');
+  participantsList.innerHTML = t.participants.length
+    ? t.participants.map(p => `
+      <button type="button" class="part-row" data-profile-token="${esc(p.profile_token || '')}">
+        ${avatarHtml(p.first_name, p.avatar_url, false, p.avatar_emoji)}
+        <span class="part-row__text">
+          <span class="part-row__name">${esc(p.first_name)}</span>
+          ${p.anonymous ? '<span class="part-row__meta">Анонимный профиль</span>' : ''}
+        </span>
+        ${p.is_me ? '<span class="badge badge--level">Вы</span>' : ''}
+        <svg class="part-row__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 18l6-6-6-6"/>
+        </svg>
+      </button>`).join('')
+    : '<div class="empty empty--inline"><div>Пока никто не записан</div></div>';
+  participantsSheet.classList.add('is-open');
+  haptic('light');
+}
+function closeParticipants() {
+  participantsSheet.classList.remove('is-open');
+}
+document.querySelectorAll('[data-part-close]').forEach(el =>
+  el.addEventListener('click', closeParticipants));
+participantsList.addEventListener('click', ev => {
+  const row = ev.target.closest('[data-profile-token]');
+  if (!row || !row.dataset.profileToken) return;
+  closeParticipants();
+  openPlayerProfile(row.dataset.profileToken);
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && participantsSheet.classList.contains('is-open')) closeParticipants();
+});
+
+// ===== Личное сообщение тренеру =====
+const msgSheet = document.getElementById('msg-sheet');
+let MSG_TRAINING = null;
+async function loadMsgThread() {
+  const log = document.getElementById('msg-log');
+  log.innerHTML = '<div class="chat-empty">Загружаем переписку…</div>';
+  try {
+    const data = await api('/api/messages/thread');
+    log.innerHTML = data.messages.length
+      ? data.messages.map(m => `<div class="chat-bubble ${m.from_me ? 'chat-bubble--me' : ''}">${esc(m.text)}</div>`).join('')
+      : '<div class="chat-empty">Напишите тренеру — ответ появится здесь.</div>';
+    log.scrollTop = log.scrollHeight;
+  } catch (e) {
+    log.innerHTML = `<div class="chat-empty">${esc(e.message)}</div>`;
+  }
+}
+function openMsg(trainingId) {
+  MSG_TRAINING = trainingId || null;
+  msgSheet.classList.add('is-open');
+  haptic('light');
+  loadMsgThread();
+  setTimeout(() => document.getElementById('msg-text').focus(), 150);
+}
+function closeMsg() { msgSheet.classList.remove('is-open'); }
+document.querySelector('[data-msg-close]').addEventListener('click', closeMsg);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMsg(); });
+document.getElementById('msg-send').addEventListener('click', async () => {
+  const ta = document.getElementById('msg-text');
+  const text = ta.value.trim();
+  if (!text) { toast('Введите сообщение'); return; }
+  const btn = document.getElementById('msg-send');
+  btn.disabled = true;
+  try {
+    await api('/api/messages/coach', 'POST', { text, training_id: MSG_TRAINING });
+    hapticNotify('success');
+    toast('Сообщение отправлено');
+    ta.value = '';
+    await loadMsgThread();
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ===== Профиль и приватность =====
+const profileSheet = document.getElementById('profile-sheet');
+const profileAbout = document.getElementById('profile-about');
+const profileAboutCount = document.getElementById('profile-about-count');
+const profileDisplay = document.getElementById('profile-display');
+const profileUsername = document.getElementById('profile-username');
+const profilePhone = document.getElementById('profile-phone');
+const profileNotifyAll = document.getElementById('profile-notify-all');
+const profileNotifyMatches = document.getElementById('profile-notify-matches');
+const profileNotifyTrainings = document.getElementById('profile-notify-trainings');
+const profileNotifyMessages = document.getElementById('profile-notify-messages');
+
+function syncNotificationControls() {
+  if (!APP.me) return;
+  const enabled = !!APP.me.notifications_enabled;
+  document.getElementById('notif-toggle').checked = enabled;
+  profileNotifyAll.checked = enabled;
+  profileNotifyMatches.checked = APP.me.notify_matches !== false;
+  profileNotifyTrainings.checked = APP.me.notify_trainings !== false;
+  profileNotifyMessages.checked = APP.me.notify_messages !== false;
+}
+
+function updateProfileAboutCount() {
+  profileAboutCount.textContent = `${profileAbout.value.length} / 450`;
+}
+profileAbout.addEventListener('input', updateProfileAboutCount);
+
+// ===== Памятка первого запуска =====
+const onboardingSheet = document.getElementById('onboarding-sheet');
+const onboardingTitle = document.getElementById('onboarding-title');
+const onboardingGuide = document.getElementById('onboarding-guide');
+const onboardingPrivacy = document.getElementById('onboarding-privacy');
+
+function showOnboarding() {
+  if (!APP.me || APP.me.onboarding_seen) return;
+  onboardingTitle.textContent = 'Как пользоваться';
+  onboardingGuide.hidden = false;
+  onboardingPrivacy.hidden = true;
+  onboardingSheet.classList.add('is-open');
+  haptic('light');
+  setTimeout(() => document.getElementById('onboarding-next').focus(), 150);
+}
+
+function showOnboardingPrivacy() {
+  onboardingTitle.textContent = 'Приватность';
+  onboardingGuide.hidden = true;
+  onboardingPrivacy.hidden = false;
+  haptic('light');
+  setTimeout(() => document.getElementById('onboarding-setup').focus(), 150);
+}
+
+function markOnboardingSeen() {
+  if (!APP.me || APP.me.onboarding_seen) return;
+  APP.me.onboarding_seen = true;
+  // Не блокируем интерфейс: если запрос не прошёл, памятка просто
+  // появится при следующем запуске.
+  api('/api/me/onboarding', 'POST').catch(() => {});
+}
+
+function closeOnboarding() {
+  if (!onboardingSheet.classList.contains('is-open')) return;
+  onboardingSheet.classList.remove('is-open');
+  markOnboardingSeen();
+}
+
+function maybeShowOnboarding() {
+  if (APP.me && !APP.me.onboarding_seen) showOnboarding();
+}
+
+document.getElementById('onboarding-next').addEventListener('click', showOnboardingPrivacy);
+document.getElementById('onboarding-skip').addEventListener('click', closeOnboarding);
+document.getElementById('onboarding-done').addEventListener('click', closeOnboarding);
+document.getElementById('onboarding-setup').addEventListener('click', () => {
+  closeOnboarding();
+  openProfile();
+});
+document.querySelector('[data-onboarding-close]').addEventListener('click', closeOnboarding);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && onboardingSheet.classList.contains('is-open')) closeOnboarding();
+});
+
+function paintProfile() {
+  const about = document.getElementById('me-about');
+  if (!APP.me) return;
+  about.textContent = APP.me.about || '';
+  about.hidden = !APP.me.about;
+}
+
+function updateProfilePreview() {
+  const el = document.getElementById('profile-preview');
+  if (!APP.me) return;
+  if (profileDisplay.value === 'animal') {
+    const a = APP.me.animal;
+    el.textContent = a
+      ? `Тренер и другие игроки увидят: ${a.emoji} ${a.name}.`
+      : 'Тренер и другие игроки увидят вымышленное животное.';
+  } else {
+    el.textContent = 'Тренер и другие игроки увидят ваше имя и фото из Telegram.';
+  }
+}
+
+function openProfile() {
+  if (!APP.me) return;
+  profileAbout.value = APP.me.about || '';
+  updateProfileAboutCount();
+  profileDisplay.value = APP.me.display_mode || 'name';
+  profileUsername.checked = !!APP.me.show_username;
+  profilePhone.value = APP.me.phone || '';
+  syncNotificationControls();
+  updateProfilePreview();
+  profileSheet.querySelector('.sheet__body').scrollTop = 0;
+  profileSheet.classList.add('is-open');
+  haptic('light');
+  setTimeout(() => document.getElementById('profile-sheet-title').focus(), 150);
+}
+
+function closeProfile() { profileSheet.classList.remove('is-open'); }
+
+document.getElementById('profile-edit').addEventListener('click', openProfile);
+document.querySelector('[data-profile-close]').addEventListener('click', closeProfile);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeProfile(); });
+profileDisplay.addEventListener('change', updateProfilePreview);
+document.getElementById('profile-msg').addEventListener('click', () => openMsg(null));
+
+document.getElementById('profile-save').addEventListener('click', async () => {
+  const btn = document.getElementById('profile-save');
+  btn.disabled = true;
+  try {
+    const data = await api('/api/me/profile', 'PUT', {
+      about: profileAbout.value.trim(),
+      display_mode: profileDisplay.value,
+      show_username: profileUsername.checked,
+      phone: profilePhone.value.trim(),
+      notifications_enabled: profileNotifyAll.checked,
+      notify_matches: profileNotifyMatches.checked,
+      notify_trainings: profileNotifyTrainings.checked,
+      notify_messages: profileNotifyMessages.checked,
+    });
+    APP.me = Object.assign({}, APP.me, data.profile);
+    cacheClear();
+    syncNotificationControls();
+    paintProfile();
+    hapticNotify('success');
+    toast('Настройки сохранены');
+    closeProfile();
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Проверенные цитаты профессиональных сквош-игроков.
+// Nicol David — Commonwealth Sport:
+// https://www.commonwealthsport.com/news/4419908/where-are-they-now-nicol-david
+// Ramy Ashour — Squash Player:
+// https://squashplayermagazine.tumblr.com/post/64939226175/ramy-ashour-exclusive-egyptian-at-heart-of
+// Ali Farag — World Squash:
+// https://www.worldsquash.sport/squash-has-got-everything-world-no-1-ali-farag-on-squashs-olympic-inclusion/
+// Mohamed ElShorbagy — SquashMad:
+// https://squashmad.com/interviews/mohamed-elshorbagy-i-still-have-hunger-to-compete-with-squash-top-order/
+const TRAINING_QUOTES = [
+  {
+    text: 'The Games gave me the belief that I could represent my country at the highest level. I hope to pass that feeling on to young athletes.',
+    author: 'Nicol David · Commonwealth Sport',
+  },
+  {
+    text: 'I want to show the squash world that you can be creative.',
+    author: 'Ramy Ashour · Squash Player',
+  },
+  {
+    text: "Squash has got everything. It's got all the skill sets you need. The stamina, the endurance, the technical ability, the mental challenge.",
+    author: 'Ali Farag · World Squash',
+  },
+  {
+    text: 'I still have hunger to compete with squash top order.',
+    author: 'Mohamed ElShorbagy · SquashMad',
+  },
+];
+let trainingQuoteIndex = Math.floor(Math.random() * TRAINING_QUOTES.length);
+function paintTrainingQuote() {
+  const quote = TRAINING_QUOTES[trainingQuoteIndex % TRAINING_QUOTES.length];
+  document.getElementById('training-quote').textContent = '«' + quote.text + '»';
+  document.getElementById('training-quote-author').textContent = '— ' + quote.author;
+  trainingQuoteIndex++;
+}
+paintTrainingQuote();
+setInterval(paintTrainingQuote, 60000);
+
+window.PAGE_REFRESH = async () => {
+  await APP.refresh();
+  await Promise.all([loadProfile(), loadSchedule()]);
+};
+
+Promise.allSettled([loadProfile(), loadSchedule()]).then(() => {
+  hideAppLoader();
+  setTimeout(maybeShowOnboarding, 350);
+});
+</script>
+{% endblock %}

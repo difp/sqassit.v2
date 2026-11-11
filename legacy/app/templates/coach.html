@@ -1,0 +1,2151 @@
+{% extends "base.html" %}
+{% block header %}Тренер{% endblock %}
+{% block header_right %}
+<button class="header-action" id="fab-add" type="button" aria-label="Создать тренировку" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+    <path d="M12 5v14M5 12h14"/>
+  </svg>
+</button>
+{% endblock %}
+
+{% block content %}
+<!-- ===== Заявка в тренеры (для обычных пользователей) ===== -->
+<section class="section" id="apply-section" hidden>
+  <h2 class="section-title">Стать тренером</h2>
+  <div class="card">
+    <div id="apply-status" class="hint" style="margin-bottom:12px"></div>
+    <label class="field"><span class="label">Расскажите о себе</span>
+      <textarea class="input" id="apply-text" rows="3" maxlength="1000"
+                placeholder="Опыт, где играли/тренировали, зачем вам роль тренера"></textarea></label>
+    <button class="btn btn--primary btn--block" id="apply-send">Отправить заявку</button>
+    <div class="hint" style="margin-top:8px">Заявку рассматривает тренер клуба.</div>
+  </div>
+</section>
+
+<!-- ===== Панель тренера ===== -->
+<div id="coach-content" hidden>
+  <div class="segmented" id="segmented">
+    <button type="button" data-view="active" class="is-active">Активные</button>
+    <button type="button" data-view="history">История</button>
+    <button type="button" data-view="deleted">Корзина</button>
+    <button type="button" data-view="club">Око</button>
+  </div>
+
+  <div id="list">
+    <div class="loading-state" role="status" aria-live="polite">
+      <span class="squash-loader" aria-hidden="true">
+        <svg class="squash-loader__ring" viewBox="0 0 44 44" fill="none">
+          <circle cx="22" cy="22" r="18" stroke="currentColor" stroke-opacity=".16" stroke-width="2"/>
+          <circle cx="22" cy="22" r="18" stroke="#ffd60a" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 89"/>
+        </svg>
+        <span class="squash-loader__ball">
+          <span class="squash-loader__dot"></span>
+          <span class="squash-loader__dot"></span>
+        </span>
+      </span>
+      <span>Загружаем занятия…</span>
+    </div>
+  </div>
+
+  <!-- CRM: поиск всегда на виду, полный список раскрывается -->
+  <section class="section" id="players-section">
+    <h2 class="section-title">
+      <button type="button" class="players-toggle" id="players-toggle"
+              aria-expanded="false" aria-controls="players-body">
+        <span class="players-toggle__title">Игроки</span>
+        <span class="players-toggle__count" id="players-count"></span>
+        <svg class="players-toggle__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+    </h2>
+    <div class="players-search">
+      <input type="search" class="input" id="players-search"
+             placeholder="Имя, @username или заметка"
+             aria-label="Поиск игроков" enterkeyhint="search"
+             autocomplete="off" autocapitalize="none" spellcheck="false">
+      <button type="button" class="icon-btn players-search__clear" id="players-search-clear"
+              aria-label="Очистить поиск" hidden>&times;</button>
+    </div>
+    <p class="hint players-status" id="players-status" role="status"></p>
+    <div class="players-body" id="players-body" hidden>
+      <div id="players"><div class="skeleton skeleton--row"></div></div>
+    </div>
+  </section>
+
+  <!-- Сообщения -->
+  <section class="section" id="messages-section">
+    <h2 class="section-title">Чаты с игроками</h2>
+    <div id="messages-list"><div class="skeleton skeleton--row"></div></div>
+  </section>
+
+  <!-- Заявки (администратор/менеджер) -->
+  <section class="section" id="applications-section" hidden>
+    <h2 class="section-title">Заявки в тренеры</h2>
+    <div class="card card--compact" id="applications-list"></div>
+  </section>
+
+  <!-- Профиль тренера -->
+  <section class="section" id="profile-section">
+    <h2 class="section-title">Профиль тренера</h2>
+    <div class="card" id="profile-card">
+      <div class="coach-row" id="profile-head"><div class="skeleton skeleton--row"></div></div>
+      <button class="btn btn--sm btn--block coach-edit" id="profile-edit">Редактировать профиль</button>
+    </div>
+  </section>
+
+  <!-- Тренеры (администратор/менеджер) -->
+  <section class="section" id="coaches-section" hidden>
+    <h2 class="section-title">Тренеры</h2>
+    <div class="card card--list" id="coaches-card">
+      <div id="coaches-list"><div class="skeleton skeleton--row"></div></div>
+    </div>
+    <div class="card card--form">
+      <label class="field">
+        <span class="label">Добавить тренера</span>
+        <input class="input" id="coach-input" placeholder="telegram_id или @username" autocomplete="off">
+      </label>
+      <button class="btn btn--primary btn--block" id="coach-add">Добавить тренера</button>
+      <p class="hint hint--tight">Добавить можно только после /start. Администратора снять нельзя; чужие занятия видны в режиме «Око».</p>
+    </div>
+  </section>
+</div>
+
+<!-- Bottom sheet: создание -->
+<div class="sheet" id="create-sheet">
+  <div class="sheet__backdrop" data-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="create-sheet-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="create-sheet-title">Новая тренировка</h2>
+    <form id="create-form">
+      <div class="segmented" id="create-mode">
+        <button type="button" data-create-mode="single" class="is-active" aria-pressed="true">Одна</button>
+        <button type="button" data-create-mode="repeat" aria-pressed="false">По дням</button>
+      </div>
+      <div class="row2">
+        <label class="field" id="single-date-field"><span class="label">Дата</span>
+          <input class="input" name="date" type="date" required></label>
+        <label class="field"><span class="label">Время · 24 ч</span>
+          <input class="input" id="training-time" name="time" type="text"
+                 inputmode="numeric" pattern="(?:[01][0-9]|2[0-3]):[0-5][0-9]"
+                 maxlength="5" value="19:00" placeholder="19:00"
+                 title="24-часовой формат, например 19:30"
+                 autocomplete="off" required></label>
+      </div>
+      <div id="repeat-fields" hidden>
+        <div class="row2">
+          <label class="field"><span class="label">Период с</span>
+            <input class="input" name="period_start" type="date"></label>
+          <label class="field"><span class="label">по</span>
+            <input class="input" name="period_end" type="date"></label>
+        </div>
+        <div class="field">
+          <span class="label">Дни недели</span>
+          <div class="chips" id="weekday-picker" role="group" aria-label="Дни недели">
+            <button type="button" class="chip" data-weekday="0" aria-pressed="false">Пн</button>
+            <button type="button" class="chip" data-weekday="1" aria-pressed="false">Вт</button>
+            <button type="button" class="chip" data-weekday="2" aria-pressed="false">Ср</button>
+            <button type="button" class="chip" data-weekday="3" aria-pressed="false">Чт</button>
+            <button type="button" class="chip" data-weekday="4" aria-pressed="false">Пт</button>
+            <button type="button" class="chip" data-weekday="5" aria-pressed="false">Сб</button>
+            <button type="button" class="chip" data-weekday="6" aria-pressed="false">Вс</button>
+          </div>
+          <p class="hint hint--tight" id="repeat-summary" aria-live="polite">Выберите дни недели.</p>
+        </div>
+      </div>
+      <label class="field"><span class="label">Тип тренировки</span>
+        <input class="input" name="training_type" type="text" value="Тренировка" maxlength="100" required></label>
+      <label class="field"><span class="label">Уровень игры</span>
+        <select class="input" name="level" id="level-select">
+          <option value="">Не указан</option>
+        </select></label>
+      <div class="row2">
+        <label class="field"><span class="label">Лимит мест</span>
+          <input class="input" name="capacity" type="number" min="1" max="100" value="4" required></label>
+        <label class="field"><span class="label">Длительность, мин</span>
+          <input class="input" name="duration_min" type="number" min="15" max="600" value="60"></label>
+      </div>
+      <div class="card card--compact reminder-row">
+        <span class="reminder-row__text">Напоминание игрокам</span>
+        <label class="switch"><input name="reminder_enabled" type="checkbox" aria-label="Напоминание игрокам" checked><span></span></label>
+      </div>
+      <div class="field">
+        <span class="label">За сколько до старта</span>
+        <div class="hm" style="justify-content:flex-start;gap:14px">
+          <span><input class="input" name="rem_hours" type="number" min="0" max="48" value="4" style="width:74px;min-height:44px;text-align:center;display:inline-block"> ч</span>
+          <span><input class="input" name="rem_minutes" type="number" min="0" max="59" value="30" style="width:74px;min-height:44px;text-align:center;display:inline-block"> мин</span>
+        </div>
+        <div class="chips" id="rem-presets">
+          <button type="button" class="chip" data-preset="60">1 ч</button>
+          <button type="button" class="chip" data-preset="120">2 ч</button>
+          <button type="button" class="chip" data-preset="270">4,5 ч</button>
+          <button type="button" class="chip" data-preset="720">12 ч</button>
+          <button type="button" class="chip" data-preset="1440">24 ч</button>
+        </div>
+      </div>
+      <button type="submit" class="btn btn--primary btn--block" style="margin-top:6px">Создать тренировку</button>
+    </form>
+  </div>
+</div>
+
+<!-- Bottom sheet: изменение тренировки -->
+<div class="sheet" id="edit-training-sheet">
+  <div class="sheet__backdrop" data-edit-training-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="edit-training-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="edit-training-title">Изменить тренировку</h2>
+    <form id="edit-training-form">
+      <p class="form-error" id="edit-training-error" role="alert" tabindex="-1" hidden></p>
+      <label class="field"><span class="label">Название</span>
+        <input class="input" name="training_type" type="text" maxlength="100" required></label>
+      <div class="row2">
+        <label class="field"><span class="label">Дата</span>
+          <input class="input" name="date" type="date" required></label>
+        <label class="field"><span class="label">Время</span>
+          <input class="input" name="time" type="time" required></label>
+      </div>
+      <p class="hint">Участники получат уведомление об изменении.</p>
+      <button type="submit" class="btn btn--primary btn--block">Сохранить</button>
+      <button type="button" class="btn btn--block" data-edit-training-close style="margin-top:8px">Отмена</button>
+    </form>
+  </div>
+</div>
+
+<!-- Bottom sheet: профиль -->
+<div class="sheet" id="profile-sheet">
+  <div class="sheet__backdrop" data-pclose></div>
+  <div class="sheet__panel sheet__panel--form" role="dialog" aria-modal="true" aria-labelledby="coach-profile-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="coach-profile-title" tabindex="-1">Профиль тренера</h2>
+    <div class="sheet__body">
+      <section class="settings-block" aria-labelledby="coach-about-title">
+        <h3 class="settings-block__title" id="coach-about-title">О себе</h3>
+        <label class="field"><span class="label">Кратко о вас</span>
+          <textarea class="input" id="profile-bio" maxlength="450" rows="4"
+                    placeholder="Например: тренер с 10-летним опытом, работаю над техникой и подачей"></textarea>
+          <span class="hint hint--tight" id="profile-bio-count">0 / 450</span></label>
+        <p class="hint hint--tight form-note">Игроки увидят это в карточке тренировки и смогут написать вам личное сообщение через бота.</p>
+      </section>
+
+      <section class="settings-block" aria-labelledby="coach-notifications-title">
+        <h3 class="settings-block__title" id="coach-notifications-title">Уведомления</h3>
+        <div class="settings-list">
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__title">Все уведомления</span>
+              <span class="setting-row__hint">Общий переключатель сообщений от бота.</span>
+            </span>
+            <span class="switch">
+              <input id="coach-notify-all" type="checkbox" aria-label="Все уведомления">
+              <span></span>
+            </span>
+          </label>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__title">Новые матчи</span>
+              <span class="setting-row__hint">Лента матчей и изменения в ваших матчах.</span>
+            </span>
+            <span class="switch">
+              <input id="coach-notify-matches" type="checkbox" aria-label="Новые матчи">
+              <span></span>
+            </span>
+          </label>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__title">Тренировки</span>
+              <span class="setting-row__hint">Напоминания и изменения записи игроков.</span>
+            </span>
+            <span class="switch">
+              <input id="coach-notify-trainings" type="checkbox" aria-label="Тренировки">
+              <span></span>
+            </span>
+          </label>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__title">Сообщения</span>
+              <span class="setting-row__hint">Личные сообщения от игроков.</span>
+            </span>
+            <span class="switch">
+              <input id="coach-notify-messages" type="checkbox" aria-label="Сообщения">
+              <span></span>
+            </span>
+          </label>
+        </div>
+        <p class="hint hint--tight">Если общий переключатель выключен, бот не присылает уведомления выбранных тем.</p>
+      </section>
+    </div>
+    <div class="sheet__footer">
+      <button class="btn btn--primary btn--block" id="save-profile" type="button">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom sheet: соавторы -->
+<div class="sheet" id="coauthors-sheet">
+  <div class="sheet__backdrop" data-coauthors-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="coauthors-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="coauthors-title">Соавторы</h2>
+    <p class="hint" style="margin:-8px 0 14px">Соавтор может подтверждать и отклонять заявки, видеть участников.</p>
+    <div id="coauthors-list"></div>
+    <div id="coauthors-add-wrap" hidden>
+      <label class="field"><span class="label">Добавить тренера</span>
+        <select class="input" id="coauthor-select"></select></label>
+      <button class="btn btn--primary btn--block" id="coauthor-add" type="button">Добавить соавтора</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom sheet: чат тренера -->
+<div class="sheet" id="coach-chat-sheet">
+  <div class="sheet__backdrop" data-coach-chat-close></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="coach-chat-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="coach-chat-title">Чат</h2>
+    <p class="hint form-note">Личный чат. Виден только вам и игроку.</p>
+    <div class="chat-log" id="coach-chat-log"></div>
+    <textarea class="input" id="coach-chat-text" rows="3" maxlength="1000"
+              placeholder="Напишите игроку…"></textarea>
+    <button class="btn btn--primary btn--block" id="coach-chat-send" type="button" style="margin-top:12px">Отправить</button>
+  </div>
+</div>
+
+<!-- Bottom sheet: передача занятия -->
+<div class="sheet" id="transfer-sheet">
+  <div class="sheet__backdrop" data-xclose></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="transfer-sheet-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="transfer-sheet-title">Передать занятие</h2>
+    <div class="hint" style="margin:-6px 0 12px">Выберите тренера, которому передать это занятие.</div>
+    <div id="transfer-list"></div>
+  </div>
+</div>
+
+<!-- Bottom sheet: запись игрока из базы -->
+<div class="sheet" id="book-sheet">
+  <div class="sheet__backdrop" data-bclose></div>
+  <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="book-sheet-title">
+    <div class="sheet__handle"></div>
+    <h2 class="sheet__title" id="book-sheet-title">Записать игрока</h2>
+    <p class="hint book-sheet__sub" id="book-sheet-sub"></p>
+    <div class="players-search">
+      <input class="input" id="book-search" type="search" autocomplete="off"
+             placeholder="Имя, @username, заметки" enterkeyhint="search"
+             aria-label="Найти игрока в базе">
+      <button type="button" class="players-search__clear" id="book-search-clear"
+              aria-label="Очистить поиск" hidden>×</button>
+    </div>
+    <p class="players-status" id="book-status" role="status"></p>
+    <div id="book-list" class="book-list"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let VIEW = 'active';
+let TRAININGS = [];
+let IS_OWNER = false;
+let IS_MANAGER = false;
+let XFER_TID = null;
+let CREATE_MODE = 'single';
+// Промис последней догрузки участников: нужен, чтобы вернуть прокрутку
+// после того, как высота карточек перестанет меняться.
+let HYDRATION = Promise.resolve();
+
+const WEEKDAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+// ===== Bottom sheets =====
+const sheet = document.getElementById('create-sheet');
+const profileSheet = document.getElementById('profile-sheet');
+const transferSheet = document.getElementById('transfer-sheet');
+const coauthorsSheet = document.getElementById('coauthors-sheet');
+const coauthorsList = document.getElementById('coauthors-list');
+const coauthorSelect = document.getElementById('coauthor-select');
+const coauthorsAddWrap = document.getElementById('coauthors-add-wrap');
+let COAUTH_TID = null;
+const coachChatSheet = document.getElementById('coach-chat-sheet');
+const coachChatLog = document.getElementById('coach-chat-log');
+let CHAT_USER = null;
+let CHAT_NAME = '';
+const dateInput = sheet.querySelector('[name="date"]');
+const timeField = dateInput.closest('.row2').querySelectorAll('.field')[1];
+const periodStart = sheet.querySelector('[name="period_start"]');
+const periodEnd = sheet.querySelector('[name="period_end"]');
+const singleDateField = document.getElementById('single-date-field');
+const repeatFields = document.getElementById('repeat-fields');
+const repeatSummary = document.getElementById('repeat-summary');
+const weekdayPicker = document.getElementById('weekday-picker');
+
+function isoLocal(date) {
+  return date.getFullYear() + '-' +
+    String(date.getMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getDate()).padStart(2, '0');
+}
+function localIsoDate(days = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return isoLocal(d);
+}
+function addDaysIso(iso, days) {
+  const d = new Date(iso + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return isoLocal(d);
+}
+function selectedWeekdays() {
+  return Array.from(weekdayPicker.querySelectorAll('[data-weekday]'))
+    .filter(btn => btn.getAttribute('aria-pressed') === 'true')
+    .map(btn => parseInt(btn.dataset.weekday, 10));
+}
+function trainingWord(count) {
+  const n = Math.abs(count) % 100;
+  const last = n % 10;
+  if (n >= 11 && n <= 14) return 'тренировок';
+  if (last === 1) return 'тренировка';
+  if (last >= 2 && last <= 4) return 'тренировки';
+  return 'тренировок';
+}
+function repeatDateCount() {
+  const days = selectedWeekdays();
+  const startValue = periodStart.value;
+  const endValue = periodEnd.value;
+  if (!days.length || !startValue || !endValue || endValue < startValue) return 0;
+  const start = new Date(startValue + 'T12:00:00');
+  const end = new Date(endValue + 'T12:00:00');
+  let count = 0;
+  // Не даём случайному огромному периоду подвесить WebView.
+  for (let d = new Date(start); d <= end && count < 366; d.setDate(d.getDate() + 1)) {
+    if (days.includes((d.getDay() + 6) % 7)) count++;
+  }
+  return count;
+}
+function updateRepeatSummary() {
+  const days = selectedWeekdays();
+  if (!days.length) {
+    repeatSummary.textContent = 'Выберите дни недели.';
+    return;
+  }
+  if (!periodStart.value || !periodEnd.value) {
+    repeatSummary.textContent = 'Укажите период.';
+    return;
+  }
+  if (periodEnd.value < periodStart.value) {
+    repeatSummary.textContent = 'Дата окончания раньше начала.';
+    return;
+  }
+  const count = repeatDateCount();
+  const names = days.map(day => WEEKDAY_NAMES[day]).join(', ');
+  repeatSummary.textContent = `Выбрано: ${count} ${trainingWord(count)} · ${names}`;
+}
+
+function setCreateMode(mode) {
+  CREATE_MODE = mode === 'repeat' ? 'repeat' : 'single';
+  document.querySelectorAll('#create-mode [data-create-mode]').forEach(btn => {
+    const active = btn.dataset.createMode === CREATE_MODE;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+  const repeat = CREATE_MODE === 'repeat';
+  singleDateField.hidden = repeat;
+  timeField.style.gridColumn = repeat ? '1 / -1' : '';
+  repeatFields.hidden = !repeat;
+  dateInput.required = !repeat;
+  periodStart.required = repeat;
+  periodEnd.required = repeat;
+  const submit = document.getElementById('create-form').querySelector('button[type="submit"]');
+  submit.textContent = repeat ? 'Создать тренировки' : 'Создать тренировку';
+  if (repeat) {
+    const local = localIsoDate(0);
+    const start = dateInput.value || local;
+    periodStart.value = periodStart.value || start;
+    if (periodStart.value < local) periodStart.value = local;
+    periodStart.min = local;
+    periodEnd.min = periodStart.value;
+    periodEnd.max = addDaysIso(periodStart.value, 92);
+    if (!periodEnd.value || periodEnd.value < periodStart.value) {
+      periodEnd.value = addDaysIso(periodStart.value, 28);
+    }
+    if (periodEnd.value > periodEnd.max) periodEnd.value = periodEnd.max;
+    updateRepeatSummary();
+  }
+}
+
+function openSheet() {
+  const local = localIsoDate(0);
+  dateInput.min = local;
+  if (!dateInput.value || dateInput.value < local) dateInput.value = local;
+  periodStart.min = local;
+  if (!periodStart.value || periodStart.value < local) periodStart.value = dateInput.value;
+  periodEnd.min = periodStart.value;
+  periodEnd.max = addDaysIso(periodStart.value, 92);
+  if (!periodEnd.value || periodEnd.value < periodStart.value) {
+    periodEnd.value = addDaysIso(periodStart.value, 28);
+  }
+  if (periodEnd.value > periodEnd.max) periodEnd.value = periodEnd.max;
+  ensureLevels();
+  setCreateMode(CREATE_MODE);
+  sheet.classList.add('is-open');
+  haptic('light');
+  try { tg && tg.BackButton && tg.BackButton.show(); } catch (e) {}
+}
+function closeSheet() {
+  sheet.classList.remove('is-open');
+  try { tg && tg.BackButton && tg.BackButton.hide(); } catch (e) {}
+}
+document.getElementById('fab-add').addEventListener('click', openSheet);
+sheet.querySelector('[data-close]').addEventListener('click', closeSheet);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+if (tg && tg.BackButton) tg.BackButton.onClick(() => {
+  if (isTabsOpen()) closeTabs();
+  else closeSheet();
+});
+
+document.getElementById('create-mode').addEventListener('click', ev => {
+  const btn = ev.target.closest('[data-create-mode]');
+  if (btn) setCreateMode(btn.dataset.createMode);
+});
+weekdayPicker.addEventListener('click', ev => {
+  const btn = ev.target.closest('[data-weekday]');
+  if (!btn) return;
+  const pressed = btn.getAttribute('aria-pressed') === 'true';
+  btn.setAttribute('aria-pressed', String(!pressed));
+  btn.classList.toggle('is-active', !pressed);
+  haptic('light');
+  updateRepeatSummary();
+});
+periodStart.addEventListener('change', () => {
+  periodEnd.min = periodStart.value;
+  periodEnd.max = addDaysIso(periodStart.value, 92);
+  if (!periodEnd.value || periodEnd.value < periodStart.value) {
+    periodEnd.value = addDaysIso(periodStart.value, 28);
+  }
+  if (periodEnd.value > periodEnd.max) periodEnd.value = periodEnd.max;
+  updateRepeatSummary();
+});
+periodEnd.addEventListener('change', updateRepeatSummary);
+dateInput.addEventListener('change', () => {
+  if (CREATE_MODE === 'single' && dateInput.value) {
+    periodStart.value = dateInput.value;
+    periodEnd.min = dateInput.value;
+    periodEnd.max = addDaysIso(dateInput.value, 92);
+    periodEnd.value = addDaysIso(dateInput.value, 28);
+  }
+  updateRepeatSummary();
+});
+
+// Время всегда в 24-часовом формате: 1930 -> 19:30, 07:00 и т.п.
+const trainingTime = document.getElementById('training-time');
+trainingTime.addEventListener('input', () => {
+  const raw = trainingTime.value;
+  if (raw.includes(':')) {
+    const [h, m] = raw.split(':');
+    const hh = h.replace(/\D/g, '').slice(0, 2);
+    const mm = m.replace(/\D/g, '').slice(0, 2);
+    trainingTime.value = (hh.length === 1 ? '0' + hh : hh) + ':' + mm;
+    return;
+  }
+  const digits = raw.replace(/\D/g, '').slice(0, 4);
+  trainingTime.value = digits.length > 2
+    ? digits.slice(0, 2) + ':' + digits.slice(2)
+    : digits;
+});
+trainingTime.addEventListener('blur', () => {
+  if (!trainingTime.value.trim()) return;
+  const digits = trainingTime.value.replace(/\D/g, '').padEnd(4, '0').slice(0, 4);
+  const h = Math.min(23, parseInt(digits.slice(0, 2), 10) || 0);
+  const m = Math.min(59, parseInt(digits.slice(2, 4), 10) || 0);
+  trainingTime.value = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+});
+
+document.getElementById('rem-presets').addEventListener('click', ev => {
+  const preset = ev.target.closest('[data-preset]');
+  if (!preset) return;
+  const min = parseInt(preset.dataset.preset, 10);
+  sheet.querySelector('[name="rem_hours"]').value = Math.floor(min / 60);
+  sheet.querySelector('[name="rem_minutes"]').value = min % 60;
+});
+
+// ===== Создание тренировки =====
+async function submitCreate(payload, btn) {
+  try {
+    await api('/api/coach/trainings', 'POST', payload);
+    hapticNotify('success');
+    toast('Тренировка создана');
+    closeSheet();
+    cacheClear();
+    setView('active');
+    return;
+  } catch (e) {
+    if (e.status === 409 && !payload.force) {
+      if (confirm('Такая тренировка уже есть в расписании. Создать всё равно?')) {
+        payload.force = true;
+        return submitCreate(payload, btn);
+      }
+      return;
+    }
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function submitRepeat(payload, btn) {
+  try {
+    const data = await api('/api/coach/trainings/batch', 'POST', payload);
+    const created = Number(data.created_count) || 0;
+    const skipped = Number(data.skipped_count) || 0;
+    if (!created) {
+      hapticNotify('warning');
+      toast(skipped
+        ? 'Все выбранные даты уже есть в расписании или прошли'
+        : 'Тренировки не созданы');
+      return;
+    }
+    hapticNotify('success');
+    toast(`Создано: ${created} ${trainingWord(created)}` +
+      (skipped ? `, пропущено: ${skipped}` : ''));
+    closeSheet();
+    setView('active');
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('create-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  const btn = f.querySelector('button[type="submit"]');
+  let offset = (parseInt(f.rem_hours.value, 10) || 0) * 60 + (parseInt(f.rem_minutes.value, 10) || 0);
+  offset = Math.max(0, Math.min(2880, offset));
+
+  if (CREATE_MODE === 'repeat') {
+    const days = selectedWeekdays();
+    if (!days.length) {
+      toast('Выберите хотя бы один день недели');
+      return;
+    }
+    if (!f.period_start.value || !f.period_end.value) {
+      toast('Укажите начало и конец периода');
+      return;
+    }
+    if (f.period_end.value < f.period_start.value) {
+      toast('Дата окончания раньше начала');
+      return;
+    }
+    if (repeatDateCount() === 0) {
+      toast('В выбранном периоде нет таких дней недели');
+      return;
+    }
+    const batch = {
+      period_start: f.period_start.value,
+      period_end: f.period_end.value,
+      weekdays: days,
+      time: f.time.value,
+      training_type: f.training_type.value,
+      level: f.level.value,
+      capacity: parseInt(f.capacity.value, 10),
+      duration_min: parseInt(f.duration_min.value, 10),
+      reminder_enabled: f.reminder_enabled.checked,
+      reminder_offset_min: offset,
+    };
+    btn.disabled = true;
+    await submitRepeat(batch, btn);
+    return;
+  }
+
+  const payload = {
+    date: f.date.value, time: f.time.value, training_type: f.training_type.value,
+    level: f.level.value, capacity: parseInt(f.capacity.value, 10),
+    duration_min: parseInt(f.duration_min.value, 10),
+    reminder_enabled: f.reminder_enabled.checked, reminder_offset_min: offset,
+  };
+  btn.disabled = true;
+  await submitCreate(payload, btn);
+});
+
+// ===== Сегменты =====
+document.getElementById('segmented').addEventListener('click', ev => {
+  const btn = ev.target.closest('[data-view]');
+  if (btn) setView(btn.dataset.view);
+});
+function setView(view) {
+  const changed = view !== VIEW;
+  VIEW = view;
+  document.querySelectorAll('#segmented [data-view]').forEach(b =>
+    b.classList.toggle('is-active', b.dataset.view === view));
+  loadView();
+  // Другой список всегда показываем с начала.
+  if (changed) window.scrollTo(0, 0);
+}
+async function loadView() {
+  const list = document.getElementById('list');
+  const cacheName = 'coach:' + VIEW;
+  const cached = cacheRead(cacheName);
+  if (cached) {
+    TRAININGS = cached;
+    renderList();
+  } else {
+    list.innerHTML = loaderHtml('Загружаем занятия…');
+  }
+  const url = VIEW === 'active' ? '/api/coach/trainings'
+    : VIEW === 'history' ? '/api/coach/history'
+      : VIEW === 'deleted' ? '/api/coach/deleted'
+        : '/api/coach/club/trainings';
+  try {
+    const data = await api(url);
+    cacheWrite(cacheName, data.trainings);
+    TRAININGS = data.trainings;
+    renderList();
+    if (VIEW === 'active' && typeof window.setCoachIndicator === 'function') {
+      window.setCoachIndicator(
+        TRAININGS.reduce((sum, t) => sum + (t.pending_count || 0), 0));
+    }
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message, { label: 'Повторить', onClick: loadView });
+    if (!cached) list.innerHTML = '';
+  }
+}
+function emptyState(text) { return `<div class="empty"><div>${esc(text)}</div></div>`; }
+
+// ===== Сохранение места при перерисовке =====
+// Любое действие (запись, снятие, одобрение, удаление) перерисовывает список
+// и меняет высоту карточек. Запоминаем карточку у верхней кромки и возвращаем
+// её на то же место — иначе страница прыгает на сотни пикселей.
+function captureListAnchor() {
+  const y = window.scrollY || 0;
+  const cards = [...document.querySelectorAll('#list .card')];
+  for (let i = 0; i < cards.length; i++) {
+    const box = cards[i].getBoundingClientRect();
+    if (box.bottom > 0) return { y, index: i, top: box.top };
+  }
+  return { y, index: -1, top: 0 };
+}
+function restoreListAnchor(anchor) {
+  const card = anchor.index >= 0
+    ? document.querySelectorAll('#list .card')[anchor.index] : null;
+  if (card) {
+    const delta = card.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(delta) > 1) { window.scrollBy(0, delta); return; }
+  }
+  window.scrollTo(0, anchor.y);
+}
+// Перерисовать список и вернуть страницу туда, где она была: сначала после
+// данных, затем после догрузки участников (она меняет высоту карточек).
+async function refreshKeepingPlace() {
+  const anchor = captureListAnchor();
+  cacheClear();
+  await loadView();
+  await HYDRATION;
+  restoreListAnchor(anchor);
+  requestAnimationFrame(() => restoreListAnchor(anchor));
+}
+function renderList() {
+  const list = document.getElementById('list');
+  if (!TRAININGS.length) {
+    list.innerHTML = emptyState(
+      VIEW === 'active' ? 'Предстоящих тренировок нет. Создайте кнопкой «＋».'
+        : VIEW === 'history' ? 'История пуста.'
+          : VIEW === 'deleted' ? 'Корзина пуста.'
+            : 'У других тренеров занятий нет.');
+    hideAppLoader();
+    return;
+  }
+  const render = VIEW === 'active' ? activeRow
+    : VIEW === 'history' ? historyRow
+      : VIEW === 'deleted' ? deletedRow : clubRow;
+  list.innerHTML = TRAININGS.map(render).join('');
+  HYDRATION = hydrateParticipants();
+  hideAppLoader();
+}
+
+// Списки участников раскрыты сразу: догружаем их без клика по <summary>.
+// Возвращаем промис, чтобы вызывающий код мог дождаться, когда высота
+// карточек перестанет меняться (иначе прокрутка «уезжает» после записи).
+async function hydrateParticipants() {
+  const jobs = [];
+  document.querySelectorAll('#list details[data-pid][open]').forEach(details => {
+    const box = details.querySelector('[data-plist]');
+    if (!box || box.dataset.loaded === '1') return;
+    box.dataset.loaded = '1';
+    jobs.push(refreshParticipants(details.dataset.pid));
+  });
+  await Promise.allSettled(jobs);
+}
+
+// ---------- Своё занятие ----------
+function reminderEditor(t) {
+  const h = Math.floor(t.reminder_offset_min / 60);
+  const m = t.reminder_offset_min % 60;
+  return `
+  <div class="reminder-compact" data-reminder="${t.id}">
+    <span class="reminder-compact__label">Напомнить за</span>
+    <div class="hm">
+      <span class="hm__part"><input class="input reminder-input" type="number" min="0" max="48" data-oh="${t.id}" value="${h}" aria-label="Часы до тренировки" aria-describedby="reminder-error-${t.id}"> <span>ч</span></span>
+      <span class="hm__part"><input class="input reminder-input" type="number" min="0" max="59" data-om="${t.id}" value="${m}" aria-label="Минуты до тренировки" aria-describedby="reminder-error-${t.id}"> <span>мин</span></span>
+    </div>
+    <label class="switch"><input type="checkbox" data-remind="${t.id}" aria-label="Напоминание о тренировке" ${t.reminder_enabled ? 'checked' : ''}><span></span></label>
+    <div class="reminder-error" role="status" aria-live="polite">
+      <span id="reminder-error-${t.id}" data-reminder-error="${t.id}"></span>
+      <button type="button" class="btn btn--sm" data-reminder-retry="${t.id}" hidden>Повторить</button>
+    </div>
+  </div>`;
+}
+
+// Плитка быстрого действия: иконка и подпись. Подпись важна — по одной
+// иконке тренер не всегда понимает, что именно произойдёт.
+function quickBtn(attr, label, path, danger) {
+  return `<button type="button" class="quick${danger ? ' quick--danger' : ''}" ${attr}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>
+    <span>${label}</span>
+  </button>`;
+}
+const ICON_CAL = '<rect x="3" y="4.5" width="18" height="16" rx="3.5"/><path d="M8 2.8v3.4M16 2.8v3.4M3.2 9.5h17.6"/>';
+const ICON_XFER = '<path d="M4 12h13M12 7l5 5-5 5"/>';
+const ICON_DEL = '<path d="M4 7h16M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7"/>';
+const ICON_USERS = '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>';
+
+function activeRow(t) {
+  const pct = t.capacity ? Math.min(100, Math.round((t.booked_count / t.capacity) * 100)) : 0;
+  const wait = t.waitlist_count || 0;
+  const pending = t.pending_count || 0;
+  const actions = [
+    quickBtn(`data-cal="${t.id}"`, 'Календарь', ICON_CAL),
+    t.is_owner ? quickBtn(`data-coauthors="${t.id}"`, 'Соавторы', ICON_USERS) : '',
+    t.is_owner ? quickBtn(`data-xfer="${t.id}"`, 'Передать', ICON_XFER) : '',
+    t.is_owner ? quickBtn(`data-del="${t.id}"`, 'Удалить', ICON_DEL, true) : '',
+  ].join('');
+  return `
+  <div class="card">
+    <div class="t-top">
+      <div class="t-time">${esc(t.time)}</div>
+      <div class="t-occ"><b>${t.booked_count}</b> из ${t.capacity} мест</div>
+    </div>
+    <div class="training-title-row">
+      <div class="t-title">${esc(t.type)}${pending ? ` <span class="badge badge--warn">Заявки: ${pending}</span>` : ''}</div>
+      ${t.can_manage ? `<button type="button" class="training-edit-btn" data-edit-training="${t.id}" aria-label="Изменить тренировку" title="Изменить тренировку"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button>` : ''}
+    </div>
+    <div class="t-meta">${dateAndLevel(t.date, t.level)}</div>
+    <div class="bar"><div class="bar__fill" style="width:${pct}%"></div></div>
+    <div class="inline-row bar-legend">
+      <span>Записано ${t.booked_count} из ${t.capacity}</span>
+      <span>${wait ? 'Очередь: ' + wait : 'Очередь пуста'}</span>
+    </div>
+    <div class="quick-actions">${actions}</div>
+    ${t.can_manage ? tournamentRow(t.id) : ''}
+    ${t.is_owner ? reminderEditor(t) : ''}
+    <details class="disclosure" data-pid="${t.id}" open>
+      <summary>Участники${pending ? ` · заявок ${pending}` : ''}</summary>
+      <div data-plist="${t.id}"><div class="hint" style="padding:10px 0">Загрузка…</div></div>
+    </details>
+  </div>`;
+}
+
+function historyRow(t) {
+  return `
+  <div class="card">
+    <div class="t-top">
+      <div class="t-time" style="opacity:.7">${esc(t.time)}</div>
+      <div class="t-occ">${t.duration_min} мин</div>
+    </div>
+    <div class="t-title">${esc(t.type)}</div>
+    <div class="t-meta">${dateAndLevel(t.date, t.level)}</div>
+    <div class="inline-row bar-legend" style="margin-top:12px">
+      <span>Посещаемость: <b style="color:var(--text)">${t.booked_count}</b> из ${t.capacity}</span>
+      <span class="badge badge--muted">Завершена</span>
+    </div>
+    <div class="t-actions">
+      <button class="btn" data-cal="${t.id}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_CAL}</svg>
+        В календарь
+      </button>
+      <button class="btn btn--danger" data-del="${t.id}">В корзину</button>
+    </div>
+  </div>`;
+}
+
+function deletedRow(t) {
+  return `
+  <div class="card deleted-card">
+    <div class="t-top">
+      <div class="t-time" style="opacity:.6">${esc(t.time)}</div>
+      <div class="t-occ">${t.duration_min} мин</div>
+    </div>
+    <div class="t-title">${esc(t.type)}</div>
+    <div class="t-meta"><span>${esc(fmtDay(t.date))}</span></div>
+    <div class="bar-legend" style="margin-top:10px">Было записано: ${t.booked_count}${t.waitlist_count ? ', в очереди: ' + t.waitlist_count : ''}</div>
+    <div class="t-actions">
+      <button class="btn btn--primary" data-restore="${t.id}">Восстановить</button>
+      <button class="btn btn--danger" data-purge="${t.id}">Удалить навсегда</button>
+    </div>
+  </div>`;
+}
+
+// ---------- Око (чужое, только чтение) ----------
+function clubRow(t) {
+  const coach = t.coach ? esc(t.coach.first_name) : 'Тренер';
+  const avatar = t.coach ? avatarHtml(t.coach.first_name, t.coach.avatar_url, true) : '';
+  const pending = t.pending_count || 0;
+  return `
+  <div class="card">
+    <div class="t-top">
+      <div class="t-time">${esc(t.time)}</div>
+      <div class="t-occ"><b>${t.booked_count}</b> из ${t.capacity} мест</div>
+    </div>
+    <div class="t-title">${esc(t.type)}${pending ? ` <span class="badge badge--warn">Заявки: ${pending}</span>` : ''}</div>
+    <div class="t-meta">${dateAndLevel(t.date, t.level)}</div>
+    <div class="t-coach" style="cursor:default">
+      ${avatar}
+      <div class="t-coach__text"><div class="t-coach__name">Тренер · ${coach}</div></div>
+      <span class="badge badge--muted">Только чтение</span>
+    </div>
+    <details class="disclosure" data-pid="${t.id}" open>
+      <summary>Участники${pending ? ` · заявок ${pending}` : ''}</summary>
+      <div data-plist="${t.id}"><div class="hint" style="padding:10px 0">Загрузка…</div></div>
+    </details>
+  </div>`;
+}
+
+// ===== Участники =====
+async function refreshParticipants(id) {
+  const box = document.querySelector(`[data-plist="${id}"]`);
+  if (!box) return;
+  try {
+    const data = await api(`/api/coach/trainings/${id}/participants`);
+    const own = VIEW === 'active';
+    const rows = data.participants.length
+      ? data.participants.map(p => participantRow(id, p, own)).join('')
+      : '<div class="hint" style="padding:10px 0">Пока никто не записан</div>';
+    // Тренер может записать игрока сам: тот передал просьбу устно.
+    box.innerHTML = rows + bookButton(id);
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="padding:10px 0">${esc(e.message)}</div>`;
+  }
+}
+
+function bookButton(id) {
+  const t = TRAININGS.find(x => x.id == id);
+  if (VIEW !== 'active' || !t) return '';
+  // Начавшееся занятие записывать поздно — сервер всё равно откажет.
+  if (t.start_at <= Math.floor(Date.now() / 1000)) return '';
+  return `<button type="button" class="btn btn--sm btn--block book-add" data-book="${id}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14"/>
+    </svg>
+    Записать игрока
+  </button>`;
+}
+function participantRow(tid, p, own) {
+  const badge = p.status === 'booked' ? '<span class="badge badge--success">Записан</span>'
+    : p.status === 'waitlist' ? '<span class="badge badge--warn">Очередь</span>'
+      : p.status === 'pending' ? '<span class="badge badge--warn">Заявка</span>'
+        : p.status === 'rejected' ? '<span class="badge badge--muted">Отклонён</span>'
+          : '<span class="badge badge--muted">Снят</span>';
+  const action = !own ? ''
+    : p.status === 'pending'
+      ? `<div style="display:flex;gap:6px;flex:none">
+           <button class="btn btn--primary btn--sm" data-papprove="${p.telegram_id}">Одобрить</button>
+           <button class="btn btn--danger btn--sm" data-preject="${p.telegram_id}">Отклонить</button>
+         </div>`
+      : p.status === 'cancelled'
+        ? `<button class="btn btn--sm" data-prestore="${p.telegram_id}">Вернуть</button>`
+        : p.status === 'rejected' ? ''
+          : `<button class="btn btn--danger btn--sm" data-premove="${p.telegram_id}">Снять</button>`;
+  return `
+  <div class="p-row" data-ptid="${tid}" data-uid="${p.telegram_id}">
+    <button type="button" class="participant-open" data-profile-token="${esc(p.profile_token || '')}">
+      ${avatarHtml(p.first_name, p.avatar_url, true, p.avatar_emoji)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:14px">${esc(p.first_name)}</div>
+        ${badge}
+      </div>
+    </button>
+    ${action}
+  </div>`;
+}
+
+document.getElementById('list').addEventListener('toggle', ev => {
+  if (ev.target.tagName === 'DETAILS' && ev.target.dataset.pid && ev.target.open) {
+    refreshParticipants(ev.target.dataset.pid);
+  }
+}, true);
+
+// ===== Действия по карточкам =====
+document.getElementById('list').addEventListener('click', async (ev) => {
+  const profileToken = ev.target.closest('[data-profile-token]')?.getAttribute('data-profile-token');
+  if (profileToken) { openPlayerProfile(profileToken); return; }
+  const edit = ev.target.closest('[data-edit-training]')?.getAttribute('data-edit-training');
+  if (edit) { openEditTraining(edit, ev.target.closest('[data-edit-training]')); return; }
+  const del = ev.target.closest('[data-del]')?.getAttribute('data-del');
+  const restore = ev.target.closest('[data-restore]')?.getAttribute('data-restore');
+  const purge = ev.target.closest('[data-purge]')?.getAttribute('data-purge');
+  const premove = ev.target.closest('[data-premove]')?.getAttribute('data-premove');
+  const prestore = ev.target.closest('[data-prestore]')?.getAttribute('data-prestore');
+  const papprove = ev.target.closest('[data-papprove]')?.getAttribute('data-papprove');
+  const preject = ev.target.closest('[data-preject]')?.getAttribute('data-preject');
+  const cal = ev.target.closest('[data-cal]')?.getAttribute('data-cal');
+  const xfer = ev.target.closest('[data-xfer]')?.getAttribute('data-xfer');
+  const coauthors = ev.target.closest('[data-coauthors]')?.getAttribute('data-coauthors');
+  const book = ev.target.closest('[data-book]')?.getAttribute('data-book');
+  const tournament = ev.target.closest('[data-tournament]')?.getAttribute('data-tournament');
+  const row = ev.target.closest('.p-row');
+
+  if (cal) {
+    const t = TRAININGS.find(x => x.id == cal);
+    if (t) openCalendar(t.id, t.type, t.start_at, t.duration_min, t.ics_token);
+    return;
+  }
+  if (xfer) { openTransfer(xfer); return; }
+  if (coauthors) { openCoauthors(coauthors); return; }
+  if (book) { openBook(book); return; }
+  if (tournament) { openTournament(tournament); return; }
+
+  try {
+    if (del) {
+      const t = TRAININGS.find(x => x.id == del);
+      const booked = t ? t.booked_count : 0;
+      if (booked > 0 && !confirm(`Снять тренировку? ${booked} записанных это увидят. Её можно вернуть из корзины.`)) return;
+      haptic('medium');
+      await api(`/api/coach/trainings/${del}`, 'DELETE');
+      hapticNotify('success');
+      toast('Тренировка в корзине', { label: 'Вернуть', onClick: () => restoreTraining(del) });
+      await refreshKeepingPlace();
+    } else if (restore) {
+      await restoreTraining(restore);
+    } else if (purge) {
+      if (!confirm('Удалить навсегда? Восстановить будет нельзя.')) return;
+      await api(`/api/coach/trainings/${purge}/purge`, 'DELETE');
+      hapticNotify('success');
+      toast('Удалено навсегда');
+      await refreshKeepingPlace();
+    } else if ((papprove || preject) && row) {
+      const uid = papprove || preject, tid = row.dataset.ptid;
+      const action = papprove ? 'approve' : 'reject';
+      const result = await api(`/api/coach/trainings/${tid}/participants/${uid}/${action}`, 'POST');
+      hapticNotify('success');
+      toast(action === 'approve'
+        ? (result.status === 'waitlist' ? 'Мест нет — игрок в очереди' : 'Заявка одобрена')
+        : 'Заявка отклонена');
+      await refreshKeepingPlace();
+    } else if (premove && row) {
+      const uid = premove, tid = row.dataset.ptid;
+      haptic('medium');
+      await api(`/api/coach/trainings/${tid}/participants/${uid}/cancel`, 'POST');
+      hapticNotify('success');
+      toast('Игрок снят', { label: 'Вернуть', onClick: () => restoreParticipant(tid, uid) });
+      await refreshKeepingPlace();
+    } else if (prestore && row) {
+      await restoreParticipant(row.dataset.ptid, prestore);
+    }
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  }
+});
+
+async function restoreTraining(id) {
+  try {
+    await api(`/api/coach/trainings/${id}/restore`, 'POST');
+    hapticNotify('success');
+    toast('Тренировка восстановлена');
+    cacheClear();
+    setView('active');
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+}
+async function restoreParticipant(tid, uid) {
+  try {
+    const r = await api(`/api/coach/trainings/${tid}/participants/${uid}/restore`, 'POST');
+    hapticNotify('success');
+    toast(r.status === 'waitlist' ? 'Мест нет — игрок в очереди' : 'Игрок возвращён');
+    await refreshKeepingPlace();
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+}
+
+// ===== Ручная запись игрока из базы =====
+const bookSheet = document.getElementById('book-sheet');
+const bookSearch = document.getElementById('book-search');
+const bookClear = document.getElementById('book-search-clear');
+const bookList = document.getElementById('book-list');
+const bookStatus = document.getElementById('book-status');
+const bookSub = document.getElementById('book-sheet-sub');
+const BOOK = {
+  tid: null,
+  seq: 0,
+  timer: 0,
+  query: '',
+  taken: new Map(),
+  players: null,
+  matched: null,
+  total: null,
+};
+
+function closeBookSheet() {
+  bookSheet.classList.remove('is-open');
+  clearTimeout(BOOK.timer);
+  BOOK.tid = null;
+}
+
+function bookSubtitle(t) {
+  const when = `${fmtDate(t.date)} · ${t.time}`;
+  const free = Math.max(0, t.capacity - t.booked_count);
+  const left = free
+    ? `Записано ${t.booked_count} из ${t.capacity}`
+    : 'Мест нет — игрок встанет в очередь';
+  bookSub.classList.toggle('is-full', !free);
+  bookSub.innerHTML =
+    `<span class="book-sheet__when">${esc(when)}</span>` +
+    `<span class="book-sheet__left">${esc(left)}</span>`;
+}
+
+function openBook(id) {
+  const t = TRAININGS.find(x => x.id == id);
+  if (!t) return;
+  BOOK.tid = id;
+  BOOK.query = '';
+  BOOK.players = null;
+  BOOK.matched = null;
+  BOOK.total = null;
+  BOOK.taken = new Map();
+  clearTimeout(BOOK.timer);
+  bookSearch.value = '';
+  bookClear.hidden = true;
+  bookStatus.textContent = '';
+  bookSubtitle(t);
+  bookList.innerHTML = '<div class="hint" style="padding:10px 0">Загрузка…</div>';
+  bookSheet.classList.add('is-open');
+  haptic('light');
+  // Уже записанных показываем неактивными: не нужно искать их заново.
+  loadBookTaken(id);
+  loadBookPlayers();
+  // На телефоне автфокус поднимает клавиатуру: вьюпорт прыгает, список
+  // уезжает под неё. Фокус оставляем только там, где клавиатуры нет.
+  try {
+    if (window.matchMedia('(pointer: fine)').matches) {
+      bookSearch.focus({ preventScroll: true });
+    }
+  } catch (e) {}
+}
+
+async function loadBookTaken(id) {
+  try {
+    const data = await api(`/api/coach/trainings/${id}/participants`);
+    if (BOOK.tid !== id) return;
+    BOOK.taken = new Map(
+      data.participants
+        .filter(p => ['pending', 'booked', 'waitlist'].includes(p.status))
+        .map(p => [p.telegram_id, p.status])
+    );
+    renderBookPlayers();
+  } catch (e) { /* без этого списка запись всё равно доступна */ }
+}
+
+async function loadBookPlayers() {
+  const id = BOOK.tid;
+  if (id === null) return;
+  const seq = ++BOOK.seq;
+  try {
+    const url = BOOK.query
+      ? `/api/coach/players?q=${encodeURIComponent(BOOK.query)}`
+      : '/api/coach/players';
+    const data = await api(url);
+    // Пока запрос летел, тренер мог выбрать другое занятие или изменить запрос.
+    if (seq !== BOOK.seq || BOOK.tid !== id) return;
+    BOOK.players = data.players;
+    BOOK.matched = data.matched;
+    BOOK.total = data.total;
+    renderBookPlayers();
+  } catch (e) {
+    if (seq === BOOK.seq) {
+      bookList.innerHTML = `<div class="hint" style="padding:10px 0">${esc(e.message)}</div>`;
+    }
+  }
+}
+
+function bookStatusLabel(status) {
+  if (status === 'waitlist') return 'Очередь';
+  if (status === 'pending') return 'Заявка';
+  return 'Записан';
+}
+
+function bookRow(p) {
+  const busy = BOOK.taken.get(p.telegram_id);
+  const meta = [];
+  if (p.notes) meta.push(esc(p.notes));
+  if (!meta.length && p.about) meta.push(esc(p.about));
+  const sub = meta.join(' · ');
+  const action = busy
+    ? `<span class="badge ${busy === 'booked' ? 'badge--success' : 'badge--warn'}">${bookStatusLabel(busy)}</span>`
+    : '<span class="book-row__action">Записать</span>';
+  return `
+  <div>
+  <button type="button" class="book-row" data-book-user="${p.telegram_id}"${busy ? ' aria-disabled="true"' : ''}>
+    ${avatarHtml(p.first_name, p.avatar_url, false, p.avatar_emoji)}
+    <span class="book-row__text">
+      <span class="book-row__name">${esc(p.first_name || 'Игрок')}</span>
+      ${sub ? `<span class="book-row__meta">${sub}</span>` : ''}
+    </span>
+    ${action}
+  </button>
+  ${p.username ? `<div class="hint" style="padding:0 12px 8px">${usernameLink(p.username)}</div>` : ''}
+  </div>`;
+}
+
+function renderBookPlayers() {
+  if (BOOK.players === null) return;
+  if (!BOOK.players.length) {
+    bookList.innerHTML = BOOK.query
+      ? `<div class="empty empty--inline"><div>Никого не найдено по запросу «${esc(shortQuery(BOOK.query))}».</div>` +
+        '<div class="hint">Игрок должен хотя бы раз зайти в бот.</div></div>'
+      : '<div class="empty empty--inline"><div>В базе пока нет игроков.</div></div>';
+  } else {
+    bookList.innerHTML = BOOK.players.map(bookRow).join('');
+  }
+  bookClear.hidden = !BOOK.query;
+  bookStatus.textContent = BOOK.query
+    ? `Найдено: ${BOOK.matched ?? '…'} из ${BOOK.total ?? '…'}`
+    : '';
+}
+
+function bookQuery(value, { immediate = false } = {}) {
+  BOOK.query = (value || '').trim();
+  clearTimeout(BOOK.timer);
+  if (immediate) {
+    loadBookPlayers();
+    return;
+  }
+  BOOK.timer = setTimeout(loadBookPlayers, 250);
+}
+
+async function addBookPlayer(uid, btn) {
+  const id = BOOK.tid;
+  if (id === null) return;
+  btn.disabled = true;
+  try {
+    const res = await api(`/api/coach/trainings/${id}/participants`, 'POST', {
+      user_id: uid,
+    });
+    hapticNotify('success');
+    toast(res.already
+      ? 'Игрок уже записан'
+      : res.status === 'booked' ? 'Игрок записан' : 'Мест нет — игрок в очереди');
+    closeBookSheet();
+    // Полный перерендер списка сдвигает страницу — возвращаем её на место
+    // после того, как догрузятся участники и высота карточек устоится.
+    await refreshKeepingPlace();
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+    btn.disabled = false;
+  }
+}
+
+bookSheet.querySelector('[data-bclose]').addEventListener('click', closeBookSheet);
+bookSearch.addEventListener('input', () => {
+  bookClear.hidden = !bookSearch.value;
+  bookQuery(bookSearch.value);
+});
+bookSearch.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    bookQuery(bookSearch.value, { immediate: true });
+    return;
+  }
+  if (ev.key !== 'Escape') return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (bookSearch.value) {
+    bookSearch.value = '';
+    bookClear.hidden = true;
+    bookQuery('', { immediate: true });
+    return;
+  }
+  closeBookSheet();
+});
+bookClear.addEventListener('click', () => {
+  bookSearch.value = '';
+  bookClear.hidden = true;
+  bookQuery('', { immediate: true });
+  bookSearch.focus();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') closeBookSheet();
+});
+bookList.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-book-user]');
+  if (!btn) return;
+  if (btn.getAttribute('aria-disabled') === 'true') {
+    hapticNotify('error');
+    toast('Игрок уже записан на это занятие');
+    return;
+  }
+  addBookPlayer(parseInt(btn.getAttribute('data-book-user'), 10), btn);
+});
+
+// ===== Турнир (squashtabs) =====
+// Код комнаты выдаёт сервер и хранит у занятия. В сетку подставляем
+// записавшихся; тренер при желании добавляет себя в самом турнире.
+async function openTournament(id) {
+  const btn = document.querySelector(`[data-tournament="${id}"]`);
+  if (btn) btn.disabled = true;
+  try {
+    // В карточке тренера нет массива участников: имена берём отдельным
+    // запросом, иначе openTournamentRoom получает undefined.
+    const [d, roster] = await Promise.all([
+      api(`/api/trainings/${id}/room`, 'POST'),
+      api(`/api/coach/trainings/${id}/participants`),
+    ]);
+    const names = (roster.participants || [])
+      .filter(p => p.status === 'booked')
+      .map(p => p.first_name);
+    openTournamentRoom(d.code, names);
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ===== Изменение тренировки =====
+const editTrainingSheet = document.getElementById('edit-training-sheet');
+const editTrainingForm = document.getElementById('edit-training-form');
+let editTrainingId = null;
+let editTrainingTrigger = null;
+let editTrainingInerted = [];
+const editTrainingError = document.getElementById('edit-training-error');
+function openEditTraining(id, trigger) {
+  const training = TRAININGS.find(t => t.id == id);
+  if (!training || !training.can_manage) return;
+  editTrainingId = id;
+  editTrainingTrigger = trigger;
+  editTrainingError.hidden = true;
+  editTrainingError.textContent = '';
+  editTrainingInerted = [];
+  for (let node = editTrainingSheet; node && node !== document.body; node = node.parentElement) {
+    for (const sibling of node.parentElement.children) {
+      if (sibling !== node && sibling.id !== 'toast' && !sibling.inert) {
+        sibling.inert = true;
+        editTrainingInerted.push(sibling);
+      }
+    }
+  }
+  editTrainingForm.elements.training_type.value = training.type;
+  editTrainingForm.elements.date.value = training.date;
+  editTrainingForm.elements.time.value = training.time;
+  editTrainingSheet.classList.add('is-open');
+  editTrainingForm.elements.training_type.focus();
+}
+function closeEditTraining() {
+  editTrainingSheet.classList.remove('is-open');
+  editTrainingInerted.forEach(el => { el.inert = false; });
+  editTrainingInerted = [];
+  if (editTrainingTrigger && editTrainingTrigger.isConnected) editTrainingTrigger.focus();
+}
+editTrainingSheet.querySelectorAll('[data-edit-training-close]').forEach(el => el.addEventListener('click', closeEditTraining));
+document.addEventListener('keydown', e => {
+  if (!editTrainingSheet.classList.contains('is-open')) return;
+  if (e.key === 'Escape') { closeEditTraining(); return; }
+  if (e.key !== 'Tab') return;
+  const controls = [...editTrainingSheet.querySelectorAll('input:not([disabled]), button:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]')];
+  if (!controls.length) return;
+  const first = controls[0], last = controls[controls.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !editTrainingSheet.contains(document.activeElement))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !editTrainingSheet.contains(document.activeElement))) {
+    e.preventDefault(); first.focus();
+  }
+});
+editTrainingForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const button = editTrainingForm.querySelector('[type="submit"]');
+  const training_type = editTrainingForm.elements.training_type.value.trim();
+  if (!training_type) { toast('Укажите название тренировки'); return; }
+  button.disabled = true;
+  editTrainingError.hidden = true;
+  editTrainingError.textContent = '';
+  try {
+    await api(`/api/coach/trainings/${editTrainingId}`, 'PATCH', {
+      training_type, date: editTrainingForm.elements.date.value, time: editTrainingForm.elements.time.value,
+    });
+    closeEditTraining();
+    hapticNotify('success');
+    toast('Тренировка изменена');
+    await refreshKeepingPlace();
+  } catch (err) {
+    hapticNotify('error');
+    editTrainingError.textContent = (err.message || 'Не удалось сохранить.') + ' Проверьте данные и попробуйте ещё раз.';
+    editTrainingError.hidden = false;
+    editTrainingError.focus();
+  } finally { button.disabled = false; }
+});
+
+// ===== Напоминание =====
+const REMINDER_SAVES = new Map();
+function setReminderError(id, message, retry = false, invalid = false) {
+  const error = document.querySelector(`[data-reminder-error="${id}"]`);
+  const button = document.querySelector(`[data-reminder-retry="${id}"]`);
+  if (error) error.textContent = message;
+  if (button) button.hidden = !retry;
+  for (const key of ['oh', 'om']) {
+    const input = document.querySelector(`[data-${key}="${id}"]`);
+    if (input) {
+      if (invalid) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+    }
+  }
+}
+function readReminder(id) {
+  const enabled = document.querySelector(`[data-remind="${id}"]`).checked;
+  const hours = document.querySelector(`[data-oh="${id}"]`).value.trim();
+  const minutes = document.querySelector(`[data-om="${id}"]`).value.trim();
+  if (!/^\d+$/.test(hours) || !/^\d+$/.test(minutes) ||
+      Number(hours) > 48 || Number(minutes) > 59 || Number(hours) * 60 + Number(minutes) > 2880) {
+    throw new Error('Укажите время от 0 минут до 48 часов. При 48 часах минуты должны быть равны 0.');
+  }
+  return { enabled, min: Number(hours) * 60 + Number(minutes) };
+}
+async function saveReminder(id) {
+  let state = REMINDER_SAVES.get(id);
+  if (!state) { state = { tail: Promise.resolve(), revision: 0 }; REMINDER_SAVES.set(id, state); }
+  const revision = ++state.revision;
+  let values;
+  try {
+    values = readReminder(id);
+  } catch (err) {
+    // Выключить напоминание можно даже после ошибочного ввода времени.
+    if (!document.querySelector(`[data-remind="${id}"]`).checked) {
+      const saved = TRAININGS.find(t => String(t.id) === String(id));
+      const min = saved ? saved.reminder_offset_min : 0;
+      document.querySelector(`[data-oh="${id}"]`).value = String(Math.floor(min / 60));
+      document.querySelector(`[data-om="${id}"]`).value = String(min % 60);
+      values = { enabled: false, min };
+    } else {
+      setReminderError(id, err.message, false, true);
+      return;
+    }
+  }
+  const request = state.tail.catch(() => {}).then(() =>
+    api(`/api/coach/trainings/${id}/reminder`, 'PATCH', { enabled: values.enabled, offset_min: values.min })
+  );
+  state.tail = request;
+  try {
+    await request;
+    const saved = TRAININGS.find(t => String(t.id) === String(id));
+    if (saved) { saved.reminder_enabled = values.enabled; saved.reminder_offset_min = values.min; }
+    cacheClear();
+    if (state.revision !== revision) return;
+    setReminderError(id, '');
+    haptic('light');
+    toast(values.enabled ? 'Напоминание включено: за ' + fmtOffset(values.min) : 'Напоминание выключено');
+  } catch (err) {
+    if (state.revision !== revision) return;
+    hapticNotify('error');
+    setReminderError(id, 'Не удалось сохранить. Проверьте соединение и повторите.', true);
+  }
+}
+document.getElementById('list').addEventListener('change', async ev => {
+  const id = ev.target.dataset.remind || ev.target.dataset.oh || ev.target.dataset.om;
+  if (id) await saveReminder(id);
+});
+document.getElementById('list').addEventListener('click', async ev => {
+  const retry = ev.target.closest('[data-reminder-retry]');
+  if (retry) await saveReminder(retry.getAttribute('data-reminder-retry'));
+});
+
+// ===== Соавторы =====
+async function openCoauthors(tid) {
+  COAUTH_TID = tid;
+  coauthorsList.innerHTML = loaderHtml('Загружаем соавторов…');
+  coauthorsAddWrap.hidden = true;
+  coauthorsSheet.classList.add('is-open');
+  try {
+    const [data, coaches] = await Promise.all([
+      api(`/api/coach/trainings/${tid}/coauthors`),
+      api('/api/coach/coaches'),
+    ]);
+    const list = data.coauthors || [];
+    coauthorsList.innerHTML = list.length
+      ? list.map(c => `
+        <div class="p-row">
+          ${avatarHtml(c.first_name, c.avatar_url, true)}
+          <div class="p-row__name">${esc(c.first_name)}</div>
+          ${data.can_manage ? `<button class="btn btn--danger btn--sm" data-coauthor-remove="${c.telegram_id}">Убрать</button>` : ''}
+        </div>`).join('')
+      : '<div class="hint" style="padding:8px 0">Соавторов пока нет.</div>';
+    if (data.can_manage) {
+      const current = new Set(list.map(c => c.telegram_id));
+      const me = APP.me ? APP.me.telegram_id : null;
+      const options = (coaches.coaches || []).filter(c => c.telegram_id !== me && !current.has(c.telegram_id));
+      coauthorSelect.innerHTML = options.length
+        ? options.map(c => `<option value="${c.telegram_id}">${esc(c.first_name)}${c.is_owner ? ' (администратор)' : ''}</option>`).join('')
+        : '<option value="">Нет доступных тренеров</option>';
+      coauthorsAddWrap.hidden = !options.length;
+    }
+  } catch (e) {
+    coauthorsList.innerHTML = `<div class="hint" style="padding:8px 0">${esc(e.message)}</div>`;
+  }
+}
+document.querySelector('[data-coauthors-close]').addEventListener('click', () => coauthorsSheet.classList.remove('is-open'));
+document.getElementById('coauthor-add').addEventListener('click', async () => {
+  if (!COAUTH_TID || !coauthorSelect.value) return;
+  try {
+    await api(`/api/coach/trainings/${COAUTH_TID}/coauthors`, 'POST', { telegram_id: parseInt(coauthorSelect.value, 10) });
+    hapticNotify('success');
+    toast('Соавтор добавлен');
+    openCoauthors(COAUTH_TID);
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+coauthorsList.addEventListener('click', async (ev) => {
+  const uid = ev.target.closest('[data-coauthor-remove]')?.getAttribute('data-coauthor-remove');
+  if (!uid || !COAUTH_TID) return;
+  try {
+    await api(`/api/coach/trainings/${COAUTH_TID}/coauthors/${uid}`, 'DELETE');
+    toast('Соавтор убран');
+    openCoauthors(COAUTH_TID);
+  } catch (e) { toast(e.message); }
+});
+
+// ===== Передача занятия =====
+async function openTransfer(id) {
+  XFER_TID = id;
+  const box = document.getElementById('transfer-list');
+  box.innerHTML = '<div class="hint" style="padding:8px 0">Загрузка…</div>';
+  transferSheet.classList.add('is-open');
+  try {
+    const data = await api('/api/coach/coaches');
+    const me = APP.me ? APP.me.telegram_id : null;
+    const list = data.coaches.filter(c => c.telegram_id !== me);
+    box.innerHTML = list.length ? list.map(c => `
+      <div class="p-row" data-xrow="${c.telegram_id}">
+        ${avatarHtml(c.first_name, c.avatar_url, true)}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px">${esc(c.first_name)}${c.is_owner ? ' <span class="badge badge--muted">администратор</span>' : ''}</div>
+          <div class="hint">${c.username ? usernameLink(c.username) : 'без username'}</div>
+        </div>
+        <button class="btn btn--primary btn--sm" data-xto="${c.telegram_id}">Передать</button>
+      </div>`).join('') : '<div class="hint">Других тренеров нет.</div>';
+  } catch (e) { box.innerHTML = `<div class="hint">${esc(e.message)}</div>`; }
+}
+document.querySelector('[data-xclose]').addEventListener('click', () => transferSheet.classList.remove('is-open'));
+document.getElementById('transfer-list').addEventListener('click', async (ev) => {
+  const to = ev.target.closest('[data-xto]')?.getAttribute('data-xto');
+  if (!to || !XFER_TID) return;
+  try {
+    await api(`/api/coach/trainings/${XFER_TID}/transfer`, 'POST', { telegram_id: parseInt(to, 10) });
+    hapticNotify('success');
+    toast('Занятие передано');
+    transferSheet.classList.remove('is-open');
+    await refreshKeepingPlace();
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+
+// ===== Заявка в тренеры =====
+async function loadApplyStatus() {
+  try {
+    const data = await api('/api/coach/apply');
+    const box = document.getElementById('apply-status');
+    const app = data.application;
+    if (!app) box.textContent = 'Заполните заявку — её рассмотрит тренер клуба.';
+    else if (app.status === 'pending') box.innerHTML = '⏳ Заявка отправлена и ожидает подтверждения.';
+    else if (app.status === 'rejected') box.innerHTML = '❌ Прошлая заявка отклонена. Можно отправить снова.';
+    else box.innerHTML = '✅ Одобрено.';
+  } catch (e) { /* ignore */ }
+}
+document.getElementById('apply-send').addEventListener('click', async () => {
+  const text = document.getElementById('apply-text').value.trim();
+  if (!text) { toast('Опишите себя в заявке'); return; }
+  try {
+    await api('/api/coach/apply', 'POST', { message: text });
+    hapticNotify('success');
+    toast('Заявка отправлена');
+    loadApplyStatus();
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+
+// ===== Уровни игры =====
+let LEVELS_LOADED = false;
+async function loadLevels() {
+  try {
+    const data = await api('/api/levels');
+    const sel = document.getElementById('level-select');
+    sel.innerHTML = '<option value="">Не указан</option>' +
+      data.levels.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    LEVELS_LOADED = true;
+  } catch (e) { /* не критично */ }
+}
+function ensureLevels() {
+  if (!LEVELS_LOADED) loadLevels();
+}
+
+// ===== Профиль тренера =====
+let PROFILE = { bio: '' };
+let PROFILE_LOADED = false;
+const profileBio = document.getElementById('profile-bio');
+const profileBioCount = document.getElementById('profile-bio-count');
+const coachNotifyAll = document.getElementById('coach-notify-all');
+const coachNotifyMatches = document.getElementById('coach-notify-matches');
+const coachNotifyTrainings = document.getElementById('coach-notify-trainings');
+const coachNotifyMessages = document.getElementById('coach-notify-messages');
+
+function syncCoachNotifications() {
+  if (!APP.me) return;
+  coachNotifyAll.checked = !!APP.me.notifications_enabled;
+  coachNotifyMatches.checked = APP.me.notify_matches !== false;
+  coachNotifyTrainings.checked = APP.me.notify_trainings !== false;
+  coachNotifyMessages.checked = APP.me.notify_messages !== false;
+}
+
+function updateProfileBioCount() {
+  profileBioCount.textContent = `${profileBio.value.length} / 450`;
+}
+profileBio.addEventListener('input', updateProfileBioCount);
+function renderProfileCard(p) {
+  document.getElementById('profile-head').innerHTML = `
+    ${avatarHtml(p.first_name, p.avatar_url)}
+    <div style="flex:1;min-width:0">
+      <div class="coach-name">${esc(p.first_name)}</div>
+      <div class="coach-bio">${esc(p.bio || 'Описание пока не заполнено')}</div>
+    </div>`;
+}
+async function loadProfile() {
+  if (!APP.me || !APP.me.is_coach) return;
+  try {
+    const data = await api('/api/coach/profile');
+    if (!APP.me.is_coach) return;
+    PROFILE = data.profile || { bio: '' };
+    renderProfileCard(PROFILE);
+    PROFILE_LOADED = true;
+  } catch (e) { toast(e.message); }
+}
+async function ensureProfile() {
+  if (!PROFILE_LOADED) await loadProfile();
+}
+document.getElementById('profile-edit').addEventListener('click', async () => {
+  await ensureProfile();
+  profileBio.value = PROFILE.bio || '';
+  updateProfileBioCount();
+  syncCoachNotifications();
+  profileSheet.querySelector('.sheet__body').scrollTop = 0;
+  profileSheet.classList.add('is-open');
+  haptic('light');
+  setTimeout(() => document.getElementById('coach-profile-title').focus(), 150);
+});
+document.querySelector('[data-pclose]').addEventListener('click', () => profileSheet.classList.remove('is-open'));
+document.getElementById('save-profile').addEventListener('click', async () => {
+  const btn = document.getElementById('save-profile');
+  btn.disabled = true;
+  try {
+    const data = await api('/api/coach/profile', 'PUT', {
+      bio: document.getElementById('profile-bio').value.trim(),
+    });
+    const notifications = await api('/api/me/notifications', 'PUT', {
+      enabled: coachNotifyAll.checked,
+      notify_matches: coachNotifyMatches.checked,
+      notify_trainings: coachNotifyTrainings.checked,
+      notify_messages: coachNotifyMessages.checked,
+    });
+    PROFILE = data.profile;
+    if (APP.me) APP.me = Object.assign({}, APP.me, notifications);
+    renderProfileCard(PROFILE);
+    hapticNotify('success');
+    toast('Настройки сохранены');
+    profileSheet.classList.remove('is-open');
+  } catch (e) {
+    hapticNotify('error');
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ===== Сообщения =====
+async function loadMessages() {
+  const box = document.getElementById('messages-list');
+  if (!box) return;
+  try {
+    const data = await api('/api/coach/messages');
+    box.innerHTML = data.conversations.length
+      ? data.conversations.map(c => `
+        <button type="button" class="card player-open chat-row" data-chat-user="${c.telegram_id}" data-chat-name="${esc(c.first_name)}">
+          ${avatarHtml(c.first_name, c.avatar_url, false)}
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(c.first_name)}</div>
+            <div class="hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.last_text)}</div>
+          </div>
+        </button>`).join('')
+      : '<div class="empty empty--inline"><div>Личных чатов пока нет. Напишите игроку из карточки.</div></div>';
+  } catch (e) { box.innerHTML = `<div class="hint">${esc(e.message)}</div>`; }
+}
+async function openCoachChat(userId, name) {
+  CHAT_USER = userId;
+  CHAT_NAME = name || 'Игрок';
+  document.getElementById('coach-chat-title').textContent = `Чат: ${CHAT_NAME}`;
+  coachChatSheet.classList.add('is-open');
+  await loadCoachChat();
+  setTimeout(() => document.getElementById('coach-chat-text').focus(), 150);
+}
+async function loadCoachChat() {
+  coachChatLog.innerHTML = '<div class="chat-empty">Загружаем переписку…</div>';
+  try {
+    const data = await api(`/api/coach/messages/${CHAT_USER}`);
+    coachChatLog.innerHTML = data.messages.length
+      ? data.messages.map(m => `<div class="chat-bubble ${m.from_me ? 'chat-bubble--me' : ''}">${esc(m.text)}</div>`).join('')
+      : '<div class="chat-empty">Сообщений пока нет. Напишите первым.</div>';
+    coachChatLog.scrollTop = coachChatLog.scrollHeight;
+  } catch (e) { coachChatLog.innerHTML = `<div class="chat-empty">${esc(e.message)}</div>`; }
+}
+document.querySelector('[data-coach-chat-close]').addEventListener('click', () => coachChatSheet.classList.remove('is-open'));
+document.getElementById('messages-list').addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-chat-user]');
+  if (el) openCoachChat(parseInt(el.getAttribute('data-chat-user'), 10), el.getAttribute('data-chat-name') || '');
+});
+document.getElementById('coach-chat-send').addEventListener('click', async () => {
+  const ta = document.getElementById('coach-chat-text');
+  const text = ta.value.trim();
+  if (!text || !CHAT_USER) return;
+  const btn = document.getElementById('coach-chat-send');
+  btn.disabled = true;
+  try {
+    await api(`/api/coach/messages/${CHAT_USER}`, 'POST', { text });
+    ta.value = '';
+    await loadCoachChat();
+    loadMessages();
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+});
+
+// ===== CRM =====
+function playerRow(p) {
+  const notif = p.notifications_enabled ? 'вкл' : 'выкл';
+  const handle = p.username ? usernameLink(p.username) : 'без username';
+  return `
+  <div class="card">
+    <div class="player-head">
+      <button type="button" class="player-open" data-profile-token="${esc(p.profile_token || '')}">
+        ${avatarHtml(p.first_name, p.avatar_url, false, p.avatar_emoji)}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(p.first_name || 'Игрок')}</div>
+          <div class="player-meta"><span>уведомления: ${notif}</span></div>
+        </div>
+      </button>
+      <button type="button" class="btn btn--sm player-chat-btn" data-chat-user="${p.telegram_id}" data-chat-name="${esc(p.first_name || 'Игрок')}" aria-label="Написать игроку: ${esc(p.first_name || 'Игрок')}">Написать</button>
+    </div>
+    <div class="player-meta">${handle}</div>
+    ${p.about ? `<div class="player-about">${esc(p.about)}</div>` : ''}
+    <details class="disclosure">
+      <summary>Заметки тренера</summary>
+      <textarea class="input" data-notes="${p.telegram_id}" rows="2" style="margin-top:8px">${esc(p.notes)}</textarea>
+      <button class="btn btn--primary btn--sm" data-save="${p.telegram_id}" style="margin-top:8px">Сохранить</button>
+    </details>
+  </div>`;
+}
+const playersSection = document.getElementById('players-section');
+const playersToggle = document.getElementById('players-toggle');
+const playersBody = document.getElementById('players-body');
+const playersBox = document.getElementById('players');
+const playersSearch = document.getElementById('players-search');
+const playersClear = document.getElementById('players-search-clear');
+const playersCount = document.getElementById('players-count');
+const playersStatus = document.getElementById('players-status');
+const PLAYERS = {
+  open: false,
+  loaded: false,
+  loadedQuery: null,
+  stale: false,
+  seq: 0,
+  timer: 0,
+  query: '',
+  players: [],
+  total: null,
+  matched: null,
+};
+
+function playersAvailable() {
+  return !!(APP.me && APP.me.is_coach);
+}
+
+function setPlayersOpen(open) {
+  PLAYERS.open = !!open;
+  playersBody.hidden = !PLAYERS.open;
+  playersSection.classList.toggle('is-open', PLAYERS.open);
+  playersToggle.setAttribute('aria-expanded', PLAYERS.open ? 'true' : 'false');
+}
+
+function resetPlayersQuery() {
+  PLAYERS.query = '';
+  PLAYERS.matched = null;
+  clearTimeout(PLAYERS.timer);
+  updatePlayersStatus();
+}
+
+function setPlayersCount(total) {
+  if (typeof total === 'number') PLAYERS.total = total;
+  playersCount.textContent = typeof PLAYERS.total === 'number' ? String(PLAYERS.total) : '';
+}
+
+function updatePlayersStatus() {
+  const active = !!PLAYERS.query;
+  playersClear.hidden = !active;
+  if (!active) { playersStatus.textContent = ''; return; }
+  const matched = typeof PLAYERS.matched === 'number' ? PLAYERS.matched : '…';
+  const total = typeof PLAYERS.total === 'number' ? PLAYERS.total : '…';
+  playersStatus.textContent = `Найдено: ${matched} из ${total}`;
+}
+
+function shortQuery(value) {
+  return value.length > 40 ? value.slice(0, 40).trimEnd() + '…' : value;
+}
+
+// Свёрнутый список: счётчик тянем сразу, карточки — при раскрытии.
+async function loadPlayersCount() {
+  if (!playersAvailable()) return;
+  try {
+    const data = await api('/api/coach/players/count');
+    if (!playersAvailable()) return;
+    setPlayersCount(data.total);
+    updatePlayersStatus();
+  } catch (e) { /* счётчик не критичен: список всё равно загрузится */ }
+}
+
+async function loadPlayers({ force = false } = {}) {
+  if (!playersAvailable()) return;
+  const query = PLAYERS.query;
+  if (!force && PLAYERS.loaded && !PLAYERS.stale && PLAYERS.loadedQuery === query) return;
+  const seq = ++PLAYERS.seq;
+  try {
+    const url = query
+      ? `/api/coach/players?q=${encodeURIComponent(query)}`
+      : '/api/coach/players';
+    const data = await api(url);
+    // Пока запрос летел, пользователь мог изменить строку поиска.
+    if (seq !== PLAYERS.seq || !playersAvailable()) return;
+    PLAYERS.loaded = true;
+    PLAYERS.loadedQuery = query;
+    PLAYERS.stale = false;
+    PLAYERS.players = data.players;
+    PLAYERS.matched = data.matched;
+    setPlayersCount(data.total);
+    if (!data.players.length) {
+      playersBox.innerHTML = query
+        ? `<div class="empty empty--inline"><div>Никого не найдено по запросу «${esc(shortQuery(query))}».</div>` +
+          '<button type="button" class="btn btn--sm players-empty-reset" data-players-reset>Сбросить поиск</button></div>'
+        : '<div class="empty empty--inline"><div>Игроков пока нет.</div></div>';
+    } else {
+      playersBox.innerHTML = data.players.map(playerRow).join('');
+    }
+    updatePlayersStatus();
+  } catch (e) {
+    if (seq === PLAYERS.seq) toast(e.message);
+  }
+}
+
+// Счётчик и открытый список обновляем после смены состава тренеров.
+async function refreshPlayers() {
+  if (!playersAvailable()) return;
+  await loadPlayersCount();
+  if (!PLAYERS.open) {
+    PLAYERS.stale = true;
+    return;
+  }
+  await loadPlayers({ force: PLAYERS.loaded });
+}
+
+function applyPlayersQuery(value, { immediate = false } = {}) {
+  const next = (value || '').trim();
+  PLAYERS.query = next;
+  clearTimeout(PLAYERS.timer);
+  if (!next) PLAYERS.matched = null;
+  // Поиск всегда на виду: как только в нём что-то есть, список раскрывается.
+  if (next) setPlayersOpen(true);
+  updatePlayersStatus();
+  if (immediate) {
+    loadPlayers();
+    return;
+  }
+  PLAYERS.timer = setTimeout(loadPlayers, 250);
+}
+
+playersToggle.addEventListener('click', () => {
+  if (PLAYERS.open) {
+    // Сворачиваем вместе с запросом: иначе поле обещает выдачу, которой не видно.
+    const hadQuery = !!PLAYERS.query;
+    playersSearch.value = '';
+    resetPlayersQuery();
+    setPlayersOpen(false);
+    // Выдача в свёрнутом теле относилась к запросу — при следующем раскрытии
+    // нужен свежий список.
+    if (hadQuery) {
+      PLAYERS.loaded = false;
+      PLAYERS.loadedQuery = null;
+    }
+    return;
+  }
+  setPlayersOpen(true);
+  loadPlayers();
+});
+
+playersSearch.addEventListener('input', () => {
+  applyPlayersQuery(playersSearch.value);
+});
+
+playersSearch.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    applyPlayersQuery(playersSearch.value, { immediate: true });
+    return;
+  }
+  if (ev.key !== 'Escape') return;
+  ev.preventDefault();
+  if (playersSearch.value) {
+    playersSearch.value = '';
+    applyPlayersQuery('', { immediate: true });
+    return;
+  }
+  playersSearch.blur();
+  setPlayersOpen(false);
+});
+
+playersClear.addEventListener('click', () => {
+  playersSearch.value = '';
+  applyPlayersQuery('', { immediate: true });
+  playersSearch.focus();
+});
+document.getElementById('players').addEventListener('click', async (ev) => {
+  if (ev.target.closest('[data-players-reset]')) {
+    playersSearch.value = '';
+    applyPlayersQuery('', { immediate: true });
+    return;
+  }
+  const chat = ev.target.closest('[data-chat-user]');
+  if (chat) {
+    openCoachChat(parseInt(chat.getAttribute('data-chat-user'), 10), chat.getAttribute('data-chat-name') || '');
+    return;
+  }
+  const profileToken = ev.target.closest('[data-profile-token]')?.getAttribute('data-profile-token');
+  if (profileToken) { openPlayerProfile(profileToken); return; }
+  const btn = ev.target.closest('[data-save]');
+  const id = btn?.getAttribute('data-save');
+  if (!id) return;
+  const notes = document.querySelector(`[data-notes="${id}"]`).value;
+  try {
+    await api(`/api/coach/players/${id}/notes`, 'PUT', { notes });
+    // Локально обновляем кэш строки, но не перезапускаем активный поиск:
+    // иначе карточка исчезнет из-под курсора при несовпадении запроса.
+    const cached = PLAYERS.players.find(p => String(p.telegram_id) === id);
+    if (cached) cached.notes = notes;
+    hapticNotify('success');
+    toast('Заметка сохранена');
+    btn.disabled = true;
+    btn.textContent = 'Сохранено';
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+document.getElementById('players').addEventListener('input', (ev) => {
+  const id = ev.target.dataset.notes;
+  if (!id) return;
+  const btn = document.querySelector(`[data-save="${id}"]`);
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Сохранить';
+  }
+});
+
+// ===== Заявки (администратор/менеджер) =====
+async function loadApplications() {
+  if (!IS_MANAGER) return;
+  try {
+    const data = await api('/api/coach/applications');
+    if (!IS_MANAGER) return;
+    const section = document.getElementById('applications-section');
+    const box = document.getElementById('applications-list');
+    if (!data.applications.length) {
+      section.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    section.hidden = false;
+    box.innerHTML = data.applications.map(a => `
+      <div class="p-row" data-atid="${a.telegram_id}">
+        ${avatarHtml(a.first_name, a.avatar_url, true, a.avatar_emoji)}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px">${esc(a.first_name)}</div>
+          <div class="hint">${a.username ? usernameLink(a.username) : 'без username'}</div>
+          ${a.message ? `<div class="hint" style="margin-top:4px">${esc(a.message)}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn btn--primary btn--sm" data-approve="${a.telegram_id}">Одобрить</button>
+          <button class="btn btn--danger btn--sm" data-reject="${a.telegram_id}">Отклонить</button>
+        </div>
+      </div>`).join('');
+  } catch (e) { toast(e.message); }
+}
+document.getElementById('applications-list').addEventListener('click', async (ev) => {
+  const ok = ev.target.closest('[data-approve]')?.getAttribute('data-approve');
+  const no = ev.target.closest('[data-reject]')?.getAttribute('data-reject');
+  if (!ok && !no) return;
+  const id = ok || no;
+  try {
+    await api(`/api/coach/applications/${id}/${ok ? 'approve' : 'reject'}`, 'POST');
+    hapticNotify('success');
+    toast(ok ? 'Тренер одобрен' : 'Заявка отклонена');
+    loadApplications();
+    if (ok) {
+      loadCoaches();
+      refreshPlayers();
+    }
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+
+// ===== Реестр тренеров (администратор/менеджер) =====
+function coachRow(c) {
+  const owner = c.is_owner ? ' <span class="badge badge--muted">администратор</span>' : '';
+  const mgr = c.is_manager && !c.is_owner ? ' <span class="badge badge--level">менеджер</span>' : '';
+  const mgrToggle = (IS_OWNER && !c.is_owner)
+    ? `<label class="switch" style="transform:scale(.8);transform-origin:right center">
+         <input type="checkbox" data-mgr="${c.telegram_id}" aria-label="Права менеджера" ${c.is_manager ? 'checked' : ''}><span></span></label>`
+    : '';
+  const remove = c.is_owner ? ''
+    : `<button class="btn btn--danger btn--sm" data-cremove="${c.telegram_id}">Снять</button>`;
+  return `
+  <div class="coach-item">
+    ${avatarHtml(c.first_name, c.avatar_url, true)}
+    <div class="coach-item__text">
+      <div class="coach-item__name">${esc(c.first_name)}${owner}${mgr}</div>
+      <div class="coach-item__meta">${c.username ? usernameLink(c.username) : 'без username'}</div>
+    </div>
+    <div class="coach-item__actions">${mgrToggle}${remove}</div>
+  </div>`;
+}
+async function loadCoaches() {
+  if (!IS_MANAGER) return;
+  try {
+    const data = await api('/api/coach/coaches');
+    if (!IS_MANAGER) return;
+    document.getElementById('coaches-list').innerHTML = data.coaches.map(coachRow).join('');
+  } catch (e) { toast(e.message); }
+}
+document.getElementById('coach-add').addEventListener('click', async () => {
+  const raw = document.getElementById('coach-input').value.trim();
+  if (!raw) { toast('Укажите telegram_id или @username'); return; }
+  const payload = /^\d+$/.test(raw) ? { telegram_id: parseInt(raw, 10) } : { username: raw.replace(/^@/, '') };
+  try {
+    const r = await api('/api/coach/coaches', 'POST', payload);
+    hapticNotify('success');
+    toast(r.created ? 'Тренер добавлен' : 'Уже является тренером');
+    document.getElementById('coach-input').value = '';
+    loadCoaches();
+    refreshPlayers();
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+document.getElementById('coaches-list').addEventListener('click', async (ev) => {
+  const id = ev.target.closest('[data-cremove]')?.getAttribute('data-cremove');
+  if (!id) return;
+  if (!confirm('Снять роль тренера у этого пользователя?')) return;
+  try {
+    await api(`/api/coach/coaches/${id}`, 'DELETE');
+    hapticNotify('success');
+    toast('Роль снята');
+    loadCoaches();
+    refreshPlayers();
+  } catch (e) { hapticNotify('error'); toast(e.message); }
+});
+document.getElementById('coaches-list').addEventListener('change', async (ev) => {
+  const id = ev.target.getAttribute('data-mgr');
+  if (!id) return;
+  try {
+    await api(`/api/coach/coaches/${id}/manager`, 'PATCH', { enabled: ev.target.checked });
+    haptic('light');
+    toast(ev.target.checked ? 'Права менеджера выданы' : 'Права менеджера сняты');
+  } catch (e) { hapticNotify('error'); toast(e.message); loadCoaches(); }
+});
+
+// ===== Ленивая загрузка нижних секций =====
+function whenVisible(id, fn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!('IntersectionObserver' in window)) {
+    fn();
+    return;
+  }
+  let done = false;
+  const observer = new IntersectionObserver(entries => {
+    if (done || !entries.some(e => e.isIntersecting)) return;
+    done = true;
+    observer.disconnect();
+    fn();
+  }, { rootMargin: '140px 0px' });
+  observer.observe(el);
+}
+
+// ===== Роль и обновление без перезагрузки страницы =====
+function applyRoleUi(me) {
+  IS_OWNER = !!me.is_owner;
+  IS_MANAGER = !!me.is_manager;
+  document.getElementById('coach-content').hidden = !me.is_coach;
+  document.getElementById('fab-add').hidden = !me.is_coach;
+  document.getElementById('apply-section').hidden = !!me.is_coach;
+  if (!IS_MANAGER) {
+    // При снятии прав менеджера не оставляем в DOM устаревшие разделы.
+    document.getElementById('applications-section').hidden = true;
+    document.getElementById('coaches-section').hidden = true;
+  }
+}
+
+window.PAGE_REFRESH = async () => {
+  // Перечитываем /api/me: роль могли выдать или снять, пока страница открыта.
+  const me = await APP.refresh();
+  if (!me) {
+    await loadApplyStatus();
+    return;
+  }
+  applyRoleUi(me);
+
+  if (!me.is_coach) {
+    await loadApplyStatus();
+    return;
+  }
+
+  const jobs = [loadView(), refreshPlayers(), loadProfile(), loadMessages()];
+  if (IS_MANAGER) {
+    document.getElementById('coaches-section').hidden = false;
+    jobs.push(loadApplications(), loadCoaches());
+  }
+  await Promise.all(jobs);
+};
+
+// ===== Инициализация по роли =====
+(async () => {
+  await APP.ready;
+  const me = APP.me;
+  if (!me) {
+    hideAppLoader();
+    return;
+  }
+  applyRoleUi(me);
+
+  try {
+    if (me.is_coach) {
+      // Сначала показываем главное — список занятий. Остальные секции
+      // догружаем в фоне, не задерживая открытие вкладки.
+      await loadView();
+      hideAppLoader();
+      const background = [loadPlayersCount(), loadProfile(), loadMessages()];
+      if (IS_MANAGER) {
+        document.getElementById('coaches-section').hidden = false;
+        background.push(loadApplications(), loadCoaches());
+      }
+      Promise.allSettled(background);
+    } else {
+      await loadApplyStatus();
+      hideAppLoader();
+    }
+  } catch (e) {
+    hideAppLoader();
+  }
+})();
+</script>
+{% endblock %}

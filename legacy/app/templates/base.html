@@ -1,0 +1,1964 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Сквош-тренировки</title>
+  <link rel="preload" href="/static/telegram-web-app.js" as="script">
+  <script>
+    // Отключаем восстановление позиции до того, как WebView успеет её
+    // применить: иначе вкладка открывается с середины прошлой сессии.
+    try { history.scrollRestoration = 'manual'; } catch (e) {}
+
+    // Тема нужна до отрисовки, чтобы цвета уровней и подсказок не мигали.
+    // Сам Telegram-скрипт грузим в конце body: шапка и скелетоны видны сразу.
+    try {
+      document.documentElement.dataset.theme =
+        (window.Telegram && Telegram.WebApp && Telegram.WebApp.colorScheme) ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  </script>
+  <style>
+    /* ===== Токены темы =====
+       Своя палитра вместо --tg-theme-*: Telegram отдаёт любую комбинацию
+       цветов клиента, и контраст в ней не гарантирован. Переключение — по
+       data-theme, которую выставляет скрипт выше (Telegram colorScheme). */
+    :root {
+      --bg: #F4F6F9;
+      --surface: #FFFFFF;
+      --surface-2: #EFF2F6;
+      --surface-3: #E7EBF1;
+      --text: #12151A;
+      --text-2: #4E5765;
+      --text-3: #646D7A;
+      --accent: #0F6FC5;
+      --accent-ink: #0B5CA6;
+      --accent-soft: #E7F0FA;
+      --on-accent: #FFFFFF;
+      --success: #0E7C4A;
+      --success-soft: #E4F3EA;
+      --warning: #8A5A00;
+      --warning-soft: #FFF3DC;
+      --danger: #C23B32;
+      --danger-soft: #FCECEA;
+      --border: #E3E7ED;
+      --scrim: rgba(11, 18, 32, .45);
+      --shadow-1: 0 1px 2px rgba(16, 24, 40, .04), 0 6px 16px rgba(16, 24, 40, .05);
+      --shadow-2: 0 12px 32px rgba(16, 24, 40, .12);
+
+      /* Псевдонимы: разметка и JS страниц используют эти имена. */
+      --hint: var(--text-3);
+      --secondary: var(--surface-2);
+      --header-bg: var(--bg);
+      --line: var(--border);
+      --separator: var(--border);
+      --link: var(--accent-ink);
+      --destructive: var(--danger);
+      --accent-text: var(--on-accent);
+
+      --radius-xs: 8px;
+      --radius-sm: 10px;
+      --radius-md: 12px;
+      --radius: 20px;
+      --radius-lg: 24px;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --ease: cubic-bezier(.2, 0, 0, 1);
+      --tabbar-h: 64px;
+      /* Безопасные зоны. Сначала простые значения: старый Android WebView
+         не знает env()/max(), и без запасного варианта отступы шапки
+         обнулялись бы — весь макет уезжал вверх под системную панель. */
+      --safe-top: 0px;
+      --safe-bottom: 0px;
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    [data-theme="dark"] {
+      --bg: #0D1015;
+      --surface: #161A21;
+      --surface-2: #1E242D;
+      --surface-3: #28303B;
+      --text: #F3F6FA;
+      --text-2: #A6B0BE;
+      --text-3: #828D9E;
+      --accent: #4C9BFF;
+      --accent-ink: #8CC0FF;
+      --accent-soft: #15263C;
+      --on-accent: #06111F;
+      --success: #57CE92;
+      --success-soft: #132A20;
+      --warning: #E9B44C;
+      --warning-soft: #2A2113;
+      --danger: #FF8078;
+      --danger-soft: #2E1717;
+      --border: #262E39;
+      --scrim: rgba(5, 8, 14, .8);
+      --shadow-1: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 22px rgba(0, 0, 0, .28);
+      --shadow-2: 0 14px 36px rgba(0, 0, 0, .5);
+    }
+    /* В полноэкранном режиме Telegram сообщает свои вставки: берём большее. */
+    @supports (width: max(0px, 0px)) {
+      :root {
+        --safe-top: max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px));
+        --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
+      }
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; width: 100%; max-width: 100%; }
+    html {
+      scroll-padding-top: 64px;
+      overflow-x: hidden;
+      overflow-x: clip; /* не создаёт лишний scroll-container для sticky-шапки */
+      /* Отключаем автоприближение шрифта в Android WebView: иначе текст
+         крупнее, чем в макете, и строки ломаются не как на стенде. */
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+      /* Место под полосу прокрутки зарезервировано всегда, чтобы открытие
+         шторки (overflow: hidden) не сдвигало страницу по горизонтали. */
+      scrollbar-gutter: stable;
+      /* Chrome сам «удерживает якорь» при перерисовке списка и меняет
+         прокрутку за нашей спиной. Нам нужен ручной контроль. */
+      overflow-anchor: none;
+    }
+    body { overflow-x: hidden; overflow-x: clip; }
+    .app {
+      width: 100%; max-width: 520px; margin-inline: auto;
+      min-height: 100vh; min-height: 100dvh;
+      overflow-x: hidden; overflow-x: clip;
+    }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 15px; line-height: 1.45;
+      -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+      overscroll-behavior-y: none;
+    }
+
+    /* ===== Стартовый экран загрузки ===== */
+    .app-loader {
+      position: fixed; inset: 0; z-index: 100;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; padding: 28px; text-align: center;
+      background: var(--bg); color: var(--text);
+      transition: opacity .3s ease, visibility .3s ease;
+    }
+    .app-loader.is-done { opacity: 0; visibility: hidden; pointer-events: none; }
+    .app-loader__caption {
+      font-size: 13px; color: var(--text-3); letter-spacing: .01em;
+    }
+
+    .app-auth-error {
+      position: fixed; inset: 0; z-index: 110; display: grid; place-items: center;
+      padding: 24px; background: var(--bg);
+    }
+    .app-auth-error .card { width: 100%; max-width: 420px; }
+    .app-auth-error .hint { margin: 10px 0 16px; }
+
+    /* ===== Верхняя панель ===== */
+    .app-header {
+      position: sticky; top: 0; z-index: 20; min-width: 0;
+      padding: calc(var(--safe-top) + 10px) 16px 10px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .app-title {
+      flex: 1 1 auto; min-width: 0; margin: 0;
+      font-size: 24px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .app-header__right { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
+    /* ===== Контент ===== */
+    .app-main {
+      min-width: 0; width: 100%;
+      padding: var(--space-4) var(--space-4) calc(var(--tabbar-h) + 32px + var(--safe-bottom));
+    }
+
+    .section { margin-top: var(--space-6); }
+    .section:first-child { margin-top: 0; }
+    /* Надзаголовок: 11 px с разрядкой — единственный «капс» в интерфейсе. */
+    .section-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--text-3); margin: 0 0 var(--space-2);
+    }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-2); }
+    .section-head .section-title { margin-bottom: 0; }
+
+    /* ===== Карточки ===== */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: var(--space-4);
+      box-shadow: var(--shadow-1);
+      min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+    }
+    .card + .card { margin-top: var(--space-3); }
+    .card--compact { padding: 12px 14px; }
+    .card--list { padding: 2px 14px; }
+    .card--form { padding: 14px; }
+
+    /* ===== Кнопки ===== */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      max-width: 100%;
+      min-height: 44px; padding: 0 16px;
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      font: inherit; font-size: 14px; font-weight: 600; letter-spacing: -.005em;
+      cursor: pointer;
+      background: var(--surface); color: var(--accent-ink);
+      transition: transform .15s var(--ease), opacity .15s ease, background .15s ease;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .45; pointer-events: none; }
+    .btn--primary {
+      background: var(--accent); border-color: transparent; color: var(--on-accent);
+      box-shadow: 0 6px 16px rgba(15, 111, 197, .22);
+    }
+    [data-theme="dark"] .btn--primary { box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+    .btn--danger { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+    .btn--block { width: 100%; }
+    .btn--sm { min-height: 36px; font-size: 13px; border-radius: var(--radius-sm); padding: 0 12px; }
+    .btn > svg { width: 18px; height: 18px; flex: none; }
+    /* Поле в фокусе уже обведено border + мягким кольцом: второй контур
+       (focus-visible) давал двойную рамку вокруг textarea в шторке. */
+    .btn:focus-visible, .chip:focus-visible, .tab:focus-visible,
+    .segmented button:focus-visible, .header-action:focus-visible,
+    .icon-btn:focus-visible, summary:focus-visible, .quick:focus-visible,
+    .list-action:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    .switch input:focus-visible + span {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+
+    .icon-btn {
+      flex: none; width: 40px; height: 40px; border: 0; border-radius: var(--radius-sm);
+      background: transparent; color: var(--danger);
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+    }
+    .icon-btn:active { background: var(--surface-2); }
+    .icon-btn svg { width: 20px; height: 20px; }
+
+    .header-action {
+      width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%;
+      background: var(--accent); color: var(--on-accent);
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+      box-shadow: 0 6px 16px rgba(15, 111, 197, .24);
+      transition: transform .15s ease-out, opacity .15s ease;
+    }
+    .header-action:active { transform: scale(.94); }
+    .header-action svg { width: 19px; height: 19px; }
+    .header-action--ghost {
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text-2); box-shadow: none;
+    }
+    .header-action--ghost:active { background: var(--surface-2); }
+    .header-action.is-loading svg { animation: refresh-spin .9s linear infinite; }
+    @keyframes refresh-spin { to { transform: rotate(360deg); } }
+
+    /* ===== Переключатель ===== */
+    .switch { position: relative; display: inline-block; width: 46px; height: 28px; flex: none; }
+    .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .switch span { position: absolute; inset: 0; border-radius: 14px; background: var(--surface-3); transition: background .2s; }
+    .switch span::before {
+      content: ""; position: absolute; height: 22px; width: 22px; left: 3px; top: 3px;
+      background: var(--surface); border-radius: 50%; transition: transform .2s;
+      box-shadow: 0 1px 3px rgba(16, 24, 40, .28);
+    }
+    .switch input:checked + span { background: var(--accent); }
+    .switch input:checked + span::before { transform: translateX(18px); background: var(--on-accent); }
+
+    /* ===== Бейджи ===== */
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+      font-size: 12px; font-weight: 500; line-height: 1.2;
+      padding: 5px 10px; border-radius: 999px;
+      background: var(--surface-2); color: var(--text-2);
+    }
+    /* Точка — в em, чтобы не слипалась с текстом при DPR 1. */
+    .badge::before {
+      content: ""; width: .5em; height: .5em; border-radius: 50%;
+      background: currentColor; flex: none;
+    }
+    .badge--success { background: var(--success-soft); color: var(--success); }
+    .badge--warn { background: var(--warning-soft); color: var(--warning); }
+    .badge--muted { background: var(--surface-2); color: var(--text-3); }
+    .badge--level { background: var(--accent-soft); color: var(--accent-ink); }
+
+    /* ===== Аватарки (инициал как фолбэк, картинка кладётся сверху) ===== */
+    .avatar {
+      position: relative; width: 40px; height: 40px; border-radius: 50%; overflow: hidden; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; font-weight: 600; color: var(--accent-ink); user-select: none;
+      background: var(--accent-soft);
+    }
+    .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+    .avatar-stack { display: flex; align-items: center; }
+    .avatar-stack .avatar { margin-left: -10px; box-shadow: 0 0 0 2px var(--surface); }
+    .avatar-stack .avatar:first-child { margin-left: 0; }
+    .avatar-btn {
+      display: flex; border: 0; padding: 0; margin-left: -10px;
+      background: transparent; border-radius: 50%; cursor: pointer;
+    }
+    .avatar-btn:first-child { margin-left: 0; }
+    .avatar-btn .avatar { margin-left: 0; }
+    .avatar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .participant-name {
+      border: 0; background: transparent; color: inherit;
+      font: inherit; cursor: pointer;
+      /* Имя в строке участников — тоже кнопка: расширяем зону касания
+         отступами с отрицательным полем, чтобы не менять высоту строки. */
+      padding: 3px 0; margin: -3px 0;
+    }
+    .participant-name:active { opacity: .65; }
+    .participant-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .avatar--sm { width: 28px; height: 28px; font-size: 12px; }
+    .avatar--animal { background: var(--surface-2); color: var(--text-2); font-size: 17px; }
+
+    /* ===== Карточка занятия: время, название, мета ===== */
+    .t-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .t-time {
+      font-size: 22px; font-weight: 600; letter-spacing: -.01em; line-height: 1.15;
+      font-variant-numeric: tabular-nums;
+    }
+    .t-title {
+      font-weight: 600; font-size: 17px; line-height: 1.3; letter-spacing: -.01em;
+      margin-top: 2px; overflow-wrap: break-word;
+    }
+    .t-meta {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+      font-size: 13px; color: var(--text-2); margin-top: 6px; line-height: 1.35;
+    }
+    .t-occ {
+      text-align: right; flex: none; font-variant-numeric: tabular-nums;
+      font-size: 13px; color: var(--text-2); line-height: 1.3; white-space: nowrap;
+    }
+    .t-occ b { font-size: 15px; font-weight: 600; color: var(--text); }
+    .t-people { display: flex; align-items: center; gap: 10px; margin-top: 12px; min-width: 0; }
+    .t-names { font-size: 13px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .t-organizer { font-size: 11px; font-weight: 600; color: var(--text-3); white-space: nowrap; }
+    /* Строка участников как кнопка: открывает список записавшихся. */
+    .t-people--open {
+      width: 100%; padding: 2px 0; border: 0; border-radius: var(--radius-xs);
+      background: transparent; color: inherit; font: inherit; text-align: start;
+      cursor: pointer;
+    }
+    .t-people--open .t-names { flex: 1; }
+    .t-people--open:active { opacity: .65; }
+    .t-people--open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .t-people__chevron { width: 16px; height: 16px; flex: none; color: var(--text-3); }
+
+    /* Список участников в шторке */
+    .part-row {
+      display: flex; align-items: center; gap: var(--space-3); width: 100%;
+      min-height: 56px; padding: 10px 0; border: 0;
+      border-top: 1px solid var(--border);
+      background: transparent; color: inherit; font: inherit; text-align: start;
+      cursor: pointer;
+    }
+    .part-row:first-child { border-top: 0; }
+    .part-row:active { opacity: .65; }
+    .part-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+    .part-row__text { flex: 1; min-width: 0; }
+    .part-row__name { display: block; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+    .part-row__meta { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); }
+    .part-row__chevron { width: 16px; height: 16px; flex: none; color: var(--text-3); }
+    .t-actions { margin-top: 14px; display: flex; gap: 8px; align-items: stretch; }
+    /* Две кнопки в ряд: подпись не переносится, иначе ряд «прыгает» по высоте. */
+    .t-actions .btn { flex: 1 1 0; min-width: 0; padding-inline: 10px; font-size: 13.5px; white-space: nowrap; }
+
+    .t-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .bar-legend { margin-top: 6px; font-size: 12px; color: var(--text-3); }
+    /* Место и описание матча: адрес строкой, текст — подложкой. */
+    .t-loc { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text-2); }
+    .t-loc svg { width: 14px; height: 14px; flex: none; color: var(--text-3); }
+    .t-note {
+      margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-md);
+      background: var(--surface-2); color: var(--text-2);
+      font-size: 13px; line-height: 1.4;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    /* Уровень игры — мягкая пилюля с цветом тона. */
+    .badge.level { padding: 4px 9px; }
+    .badge.level::before { display: none; }
+    .badge.level--orange { background: var(--warning-soft); color: var(--warning); }
+    .badge.level--green { background: var(--success-soft); color: var(--success); }
+    .badge.level--white { background: var(--surface-2); color: var(--text-2); }
+    .badge.level--muted { background: var(--surface-2); color: var(--text-3); }
+
+    /* Строка-действие: иконка, подпись, шеврон. */
+    .list-action {
+      display: flex; align-items: center; gap: 12px; width: 100%;
+      min-height: 52px; padding: 0 14px;
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      background: var(--surface); color: var(--text);
+      font: inherit; font-size: 14px; font-weight: 500; text-align: start;
+      cursor: pointer;
+    }
+    .list-action + .list-action { margin-top: 8px; }
+    .list-action svg { width: 18px; height: 18px; flex: none; }
+    .list-action__chevron { margin-inline-start: auto; color: var(--text-3); }
+    .list-action--danger { color: var(--danger); }
+    /* Строка-переход в другое приложение: подпись в две строки. */
+    .tournament-row { margin-top: 12px; }
+    .list-action__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .list-action__hint { font-size: 12px; font-weight: 400; color: var(--text-3); }
+    .list-action:active { background: var(--surface-2); }
+
+    /* Плитки быстрых действий тренера: иконка + подпись под ней. */
+    .quick-actions {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px; margin-top: 14px;
+    }
+    .quick {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+      min-height: 58px; padding: 8px 4px;
+      border: 0; border-radius: var(--radius-md);
+      background: var(--surface-2); color: var(--text);
+      font: inherit; font-size: 11px; font-weight: 500; line-height: 1.2;
+      text-align: center; cursor: pointer;
+    }
+    .quick svg { width: 18px; height: 18px; }
+    .quick:active { background: var(--surface-3); }
+    .quick--danger { color: var(--danger); }
+
+    /* ===== День ===== */
+    .day { margin-bottom: 20px; }
+    .day-label {
+      position: sticky; top: calc(var(--safe-top) + 58px); z-index: 10;
+      background: var(--bg); padding: 8px 2px 8px; margin: 0 -2px 8px;
+      display: flex; align-items: baseline; justify-content: space-between;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--text-3);
+    }
+
+    /* ===== Полоса заполнения (тренер) ===== */
+    .bar { height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; margin-top: 14px; }
+    .bar__fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .3s ease; }
+
+    /* ===== Формы ===== */
+    .field { display: block; margin-bottom: var(--space-3); }
+    .label { display: block; font-size: 13px; color: var(--text-3); font-weight: 500; margin-bottom: 6px; }
+    .input {
+      width: 100%; max-width: 100%; min-height: 48px; padding: 0 14px; border-radius: var(--radius-md);
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      font: inherit; font-size: 16px; appearance: none;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    .input::placeholder { color: var(--text-3); opacity: 1; }
+    .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    textarea.input { min-height: 86px; padding: 12px 14px; resize: vertical; line-height: 1.4; }
+    /* В шторке ручка изменения размера не нужна и цепляет палец. */
+    .sheet textarea.input { resize: none; }
+    select.input { padding-right: 34px; }
+    input[type="number"] { -moz-appearance: textfield; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
+    .row2 > * { min-width: 0; }
+    .inline-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+    /* ===== Сегментированный переключатель ===== */
+    .segmented {
+      display: flex; gap: 3px; background: var(--surface-2); border: 0;
+      border-radius: var(--radius-md); padding: 3px; margin-bottom: var(--space-4);
+    }
+    .segmented button {
+      flex: 1; min-height: 36px; border: 0; border-radius: 9px; background: transparent;
+      color: var(--text-2); font: inherit; font-weight: 500; font-size: 12px; cursor: pointer;
+      white-space: nowrap;
+    }
+    .segmented button.is-active {
+      background: var(--surface); color: var(--text); font-weight: 600;
+      box-shadow: 0 1px 3px rgba(16, 24, 40, .12);
+    }
+    [data-theme="dark"] .segmented button.is-active { box-shadow: 0 1px 3px rgba(0, 0, 0, .5); }
+
+    /* ===== Строка участника / подсказки ===== */
+    .p-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border); }
+    .p-row:first-child { border-top: 0; }
+    .p-row__name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+    .p-row__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex: none; }
+    .participant-open,
+    .player-open {
+      display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0;
+      border: 0; padding: 0; background: transparent; color: inherit;
+      font: inherit; text-align: left; cursor: pointer;
+    }
+    .participant-open { gap: 10px; }
+    .participant-open:active,
+    .player-open:active { opacity: .72; }
+    .participant-open:focus-visible,
+    .player-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .hint { font-size: 13px; color: var(--text-3); line-height: 1.4; }
+    [data-telegram-username] { color: var(--text); }
+    .hm { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 13px; }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .chip {
+      border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px;
+      background: var(--surface); color: var(--accent-ink);
+      font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .chip:active { transform: scale(.96); }
+    .chip.is-active,
+    .chip[aria-pressed="true"] { background: var(--accent); border-color: transparent; color: var(--on-accent); }
+    .deleted-card { opacity: .72; }
+
+    /* ===== Уровни игры: только цвет текста, без заливки ===== */
+    .level { font-weight: 600; white-space: nowrap; }
+    .level--orange { color: var(--warning); }
+    .level--green { color: var(--success); }
+    .level--white { color: var(--text); }
+    .level--muted { color: var(--text-3); }
+    [data-theme="dark"] .level--orange { color: var(--warning); }
+    [data-theme="dark"] .level--green { color: var(--success); }
+
+    /* ===== Блок тренера в карточке (тап -> написать) ===== */
+    .t-coach {
+      display: flex; align-items: center; gap: 12px;
+      margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .t-coach:active { opacity: .65; }
+    .t-coach__text { flex: 1; min-width: 0; }
+    .t-coach__name { font-weight: 600; font-size: 14px; }
+    .t-coach__bio {
+      font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.35;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .t-coach__action {
+      flex: none; display: inline-flex; align-items: center; gap: 6px;
+      font-size: 13px; font-weight: 500; color: var(--accent-ink); white-space: nowrap;
+    }
+    .t-coach__action svg { width: 15px; height: 15px; }
+
+    /* ===== Профиль тренера (страница) ===== */
+    .coach-row { display: flex; align-items: center; gap: 12px; }
+    .coach-name { font-weight: 600; font-size: 15px; }
+    .coach-bio {
+      font-size: 13px; color: var(--text-3); margin-top: 3px; line-height: 1.45;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .coach-edit { margin-top: 12px; }
+
+    /* ===== Строка реестра тренеров ===== */
+    .coach-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 0; border-top: 1px solid var(--border);
+    }
+    .coach-item:first-child { border-top: 0; padding-top: 10px; }
+    .coach-item:last-child { padding-bottom: 10px; }
+    .coach-item__text { flex: 1; min-width: 0; }
+    .coach-item__name {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 14px; font-weight: 600; line-height: 1.3;
+    }
+    .coach-item__meta {
+      font-size: 12px; color: var(--text-3); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .coach-item__actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+    /* ===== Нижняя навигация ===== */
+    .tabbar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+      display: flex; width: 100%; max-width: 520px; margin: 0 auto;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding-bottom: var(--safe-bottom);
+    }
+    .tab {
+      flex: 1; min-height: var(--tabbar-h);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      color: var(--text-3); text-decoration: none; font-size: 11px; font-weight: 500;
+      letter-spacing: .01em;
+    }
+    .tab svg { width: 20px; height: 20px; }
+    .tab.is-active { color: var(--accent); font-weight: 600; }
+    .tab__icon { position: relative; display: inline-flex; }
+    .tab__pin {
+      position: absolute; top: -2px; right: -4px;
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 0 2px var(--surface);
+    }
+    .tab__pin[hidden] { display: none; }
+
+    /* ===== Bottom sheet ===== */
+    .sheet { position: fixed; inset: 0; z-index: 50; display: none; }
+    .sheet.is-open { display: block; }
+    /* Пока шторка открыта, страница под ней стоит на месте: иначе фон
+       прокручивается пальцем и после закрытия всё «съезжает». */
+    html.has-sheet, html.has-sheet body { overflow: hidden; }
+    .sheet__backdrop {
+      position: absolute; inset: 0; background: var(--scrim);
+      opacity: 0; transition: opacity .22s; touch-action: none;
+    }
+    .sheet.is-open .sheet__backdrop { opacity: 1; }
+    .sheet__panel {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      width: 100%; max-width: 520px; margin: 0 auto;
+      background: var(--surface); border-top: 1px solid var(--border);
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      padding: 8px var(--space-4) calc(20px + var(--safe-bottom));
+      max-height: 92vh; max-height: 92dvh;
+      overflow-y: auto; overscroll-behavior: contain;
+      transform: translateY(100%); transition: transform .26s var(--ease);
+    }
+    .sheet.is-open .sheet__panel { transform: translateY(0); }
+    .sheet__handle { width: 36px; height: 4px; border-radius: 2px; background: var(--surface-3); margin: 6px auto 14px; }
+    .sheet__title { font-size: 20px; font-weight: 600; letter-spacing: -.02em; line-height: 1.25; margin: 0 0 18px; }
+    .sheet__title:focus { outline: none; }
+    .sheet__panel--form { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+    .sheet__panel--form .sheet__title { flex: none; }
+    .sheet__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: var(--space-2); }
+    .sheet__footer {
+      flex: none; padding: var(--space-3) 0 calc(var(--space-4) + var(--safe-bottom));
+      background: var(--surface); border-top: 1px solid var(--border);
+    }
+
+    /* ===== Турнир: полноэкранный iframe внутри приложения ===== */
+    /* Турнир — тёмный по своему дизайну (чёрный корт, жёлтый мяч), поэтому
+       панель над ним повторяет его палитру, а не светлую тему приложения. */
+    .tabs-overlay {
+      position: fixed; inset: 0; z-index: 70;
+      display: flex; flex-direction: column;
+      padding-top: var(--safe-top);
+      background: #0B0B0B;
+      color: #F0EFE9;
+    }
+    .tabs-overlay[hidden] { display: none; }
+    html.has-tabs, html.has-tabs body { overflow: hidden; }
+    .tabs-overlay__bar {
+      flex: none; display: flex; align-items: center; gap: 4px;
+      padding: 4px 10px 4px 4px;
+      border-bottom: 1px solid #222222;
+      background: #0B0B0B;
+    }
+    .tabs-overlay__close {
+      width: 44px; height: 44px; flex: none; border: 0;
+      border-radius: var(--radius-sm);
+      background: transparent; color: #F0EFE9;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+    }
+    .tabs-overlay__close svg { width: 22px; height: 22px; }
+    .tabs-overlay__close:active { background: #1A1A1A; }
+    .tabs-overlay__title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: #F0EFE9; }
+    .tabs-overlay__code {
+      margin-inline-start: auto; padding-inline-end: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; color: #9C9A91; letter-spacing: .02em;
+    }
+    .tabs-overlay iframe {
+      flex: 1 1 auto; width: 100%; border: 0;
+      background: #0B0B0B;
+    }
+    /* Меню «Поделиться»: тёмное, как и сам турнир. */
+    .tabs-menu {
+      position: absolute; top: calc(var(--safe-top) + 54px); right: 10px; z-index: 2;
+      width: min(270px, calc(100vw - 20px));
+      padding: 6px;
+      background: #161616; border: 1px solid #2A2A2A; border-radius: 12px;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+    }
+    .tabs-menu[hidden] { display: none; }
+    .tabs-menu__item {
+      display: flex; flex-direction: column; gap: 2px; width: 100%;
+      min-height: 48px; padding: 8px 12px; border: 0; border-radius: 8px;
+      background: transparent; color: #F0EFE9;
+      font: inherit; font-size: 14px; font-weight: 500; text-align: start;
+      cursor: pointer;
+    }
+    .tabs-menu__item:active { background: #222222; }
+    .tabs-menu__item:focus-visible { outline: 2px solid #FFE14D; outline-offset: 2px; }
+    .tabs-menu__hint { font-size: 12px; font-weight: 400; color: #9C9A91; }
+
+    /* ===== Тост ===== */
+    .toast {
+      position: fixed; left: 50%; z-index: 60;
+      bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 16px);
+      transform: translateX(-50%) translateY(16px);
+      display: flex; align-items: center; gap: 12px; justify-content: center;
+      background: var(--text); color: var(--bg);
+      padding: 12px 16px; border-radius: var(--radius-md); font-size: 14px; font-weight: 500;
+      max-width: min(440px, calc(100vw - 32px)); text-align: center;
+      box-shadow: var(--shadow-2);
+      opacity: 0; pointer-events: none; transition: transform .2s, opacity .2s;
+    }
+    .toast.is-show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+    .toast__action {
+      flex: none; border: 0; background: transparent; color: var(--accent);
+      font: inherit; font-weight: 600; cursor: pointer; padding: 2px 4px;
+    }
+    [data-theme="dark"] .toast { background: #E9EEF6; color: #0D1015; }
+    [data-theme="dark"] .toast__action { color: #0B5CA6; }
+
+    /* ===== Пустое состояние / скелетон ===== */
+    .empty {
+      text-align: center; padding: 36px 18px; color: var(--text-3); font-size: 14px;
+      background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius);
+    }
+    .empty svg { width: 40px; height: 40px; opacity: .5; margin-bottom: 8px; }
+    .empty--inline { padding: 14px 16px; text-align: left; }
+
+    /* ===== Профиль игрока ===== */
+    .profile-card { display: block; }
+    .profile-card__top { display: flex; align-items: center; gap: var(--space-3); }
+    .profile-card__text { flex: 1; min-width: 0; }
+    .profile-card__name { font-weight: 600; font-size: 16px; line-height: 1.3; }
+    .profile-card__sub { font-size: 13px; color: var(--text-2); margin-top: 2px; line-height: 1.35; }
+    .profile-card__about {
+      font-size: 13px; color: var(--text-2); line-height: 1.45;
+      margin-top: var(--space-3); padding-top: var(--space-3);
+      border-top: 1px solid var(--border);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .profile-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
+    .profile-actions .btn { flex: 1; min-width: 0; min-height: 38px; font-size: 13px; }
+
+    /* ===== Секции настроек в bottom sheet ===== */
+    .settings-block { margin-top: var(--space-5); }
+    .settings-block:first-of-type { margin-top: 0; }
+    .settings-block__title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--text-3); margin: 0 0 var(--space-2);
+    }
+    .settings-list {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 0 var(--space-4);
+    }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--space-3); min-height: 60px; padding: var(--space-3) 0;
+      border-top: 1px solid var(--border); cursor: pointer;
+    }
+    .setting-row:first-child { border-top: 0; }
+    .setting-row__text { flex: 1; min-width: 0; }
+    .setting-row__title { display: block; font-size: 14px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+    .setting-row__hint { display: block; font-size: 13px; color: var(--text-3); line-height: 1.4; margin-top: 2px; overflow-wrap: anywhere; }
+    .section, .settings-list, .coach-item__text, .inline-row > * { min-width: 0; }
+    .segmented, .settings-list { max-width: 100%; }
+
+    /* ===== Памятка первого запуска ===== */
+    .onboarding-list { margin: 0 0 20px; padding-left: 20px; }
+    .onboarding-list li { font-size: 14px; line-height: 1.5; }
+    .onboarding-list li + li { margin-top: 10px; }
+    .onboarding-list b { font-weight: 650; }
+
+    .hint--tight { margin: 8px 0 0; line-height: 1.4; }
+    .reminder-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .reminder-row__text { font-size: 14px; font-weight: 500; }
+    .reminder-compact {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+      margin-block-start: var(--space-3);
+    }
+    .reminder-compact__label { font-size: 13px; font-weight: 600; }
+    .reminder-compact .hm { gap: 6px; }
+    .reminder-compact .switch { margin-inline-start: auto; }
+    .reminder-error { flex-basis: 100%; color: var(--danger); font-size: 13px; line-height: 1.4; }
+    .reminder-error:empty { display: none; }
+    .reminder-error .btn { margin-inline-start: 8px; }
+    .form-error { color: var(--danger); font-size: 14px; line-height: 1.4; }
+    .form-error:focus { outline: none; }
+    .reminder-input { width: 52px; min-height: 44px; padding: 6px; text-align: center; font-variant-numeric: tabular-nums; }
+    .hm__part { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .training-title-row { display: flex; align-items: center; gap: 8px; }
+    .training-title-row .t-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .training-edit-btn {
+      display: inline-flex; align-items: center; justify-content: center; flex: none;
+      width: 44px; min-height: 44px; border: 0; border-radius: var(--radius-sm);
+      background: var(--surface-2); color: var(--text); cursor: pointer;
+    }
+    .training-edit-btn svg { width: 18px; height: 18px; }
+    .training-edit-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .setting-row .switch { margin-left: var(--space-2); }
+
+    /* Раскрывающиеся списки: точка вместо «поехавших» нативных стрелок.
+       Точка — символ в тексте подписи, а отступ задан в em: фиксированные
+       пиксели при DPR 1 схлопывались, и точка слипалась с буквой. */
+    .disclosure { margin-top: var(--space-3); }
+    .disclosure > summary {
+      display: inline-flex; align-items: center;
+      min-height: 28px; padding: 2px 0;
+      list-style: none; cursor: pointer;
+      color: var(--accent-ink); font-size: 13px; font-weight: 500;
+    }
+    .disclosure > summary::-webkit-details-marker { display: none; }
+    .disclosure > summary::marker { content: ""; }
+    .disclosure > summary::before {
+      content: "\2022"; flex: none; align-self: center;
+      font-size: 1.35em; line-height: 1; margin-right: .18em;
+      opacity: .45; transition: opacity .15s var(--ease);
+    }
+    .disclosure[open] > summary::before { opacity: 1; }
+    .disclosure > summary:active { opacity: .7; }
+    .form-note { margin: 0 2px 10px; }
+    .chat-log {
+      display: flex; flex-direction: column; gap: 8px; min-height: 120px; max-height: 320px;
+      overflow-y: auto; padding: 4px 0 8px;
+    }
+    .chat-bubble {
+      align-self: flex-start; max-width: 86%; padding: 10px 13px; border-radius: 16px;
+      background: var(--surface-2); color: var(--text);
+      font-size: 15px; line-height: 1.4;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .chat-bubble--me { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+    .chat-empty { padding: 18px 0; text-align: center; color: var(--text-3); font-size: 14px; }
+    .player-head { display: flex; align-items: center; gap: var(--space-3); }
+    /* Мета игрока: части без «·», иначе разделитель висит в конце строки. */
+    .player-meta {
+      display: flex; flex-wrap: wrap; gap: 2px 8px;
+      font-size: 12px; color: var(--text-3); margin-top: 2px;
+    }
+    .player-chat-btn { flex: none; }
+    .player-open.chat-row {
+      width: 100%; padding: 14px var(--space-4); text-align: left;
+      background: var(--surface); border: 1px solid var(--border);
+    }
+    .player-about {
+      font-size: 13px; color: var(--text-2); line-height: 1.45; margin-top: 10px;
+      padding-top: 10px; border-top: 1px solid var(--border);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+
+    /* ===== Игроки: поиск на виду, полный список раскрывается ===== */
+    #players-section { margin-top: var(--space-6); }
+    #players-section > .section-title { margin: 0; }
+    .players-toggle {
+      display: flex; align-items: center; gap: 0; width: 100%;
+      min-height: 44px; padding-inline: 0; border: 0; background: transparent;
+      font: inherit; letter-spacing: inherit; text-transform: inherit;
+      color: inherit; text-align: start; cursor: pointer;
+    }
+    .players-toggle:active { opacity: .6; }
+    .players-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .players-toggle__title { min-width: 0; }
+    .players-toggle__count { font-variant-numeric: tabular-nums; }
+    .players-toggle__count:not(:empty)::before { content: "·"; margin-inline: 6px; }
+    .players-toggle__chevron {
+      width: 16px; height: 16px; flex: none; margin-inline-start: auto;
+      transition: transform .2s var(--ease);
+    }
+    .players-toggle[aria-expanded="true"] .players-toggle__chevron { transform: rotate(180deg); }
+    .players-search { position: relative; display: flex; align-items: center; margin-top: var(--space-2); }
+    .players-search .input { padding-inline-end: 52px; }
+    input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
+    .players-search__clear {
+      position: absolute; inset-inline-end: 2px; top: 50%; transform: translateY(-50%);
+      width: 44px; height: 44px; border-radius: var(--radius-sm);
+      font-size: 20px; line-height: 1; color: var(--text-3);
+    }
+    .players-search__clear[hidden] { display: none; }
+    /* Строка статуса резервирует высоту только у раскрытого списка. */
+    .players-status {
+      margin: 0; font-variant-numeric: tabular-nums;
+    }
+    #players-section.is-open .players-status { min-height: 20px; margin-top: 6px; }
+    .players-status:not(:empty) { margin-block-end: var(--space-2); }
+    .players-empty-reset { min-height: 44px; margin-top: 12px; }
+    /* ===== Ручная запись игрока на занятие ===== */
+    .book-add { margin-top: 10px; min-height: 44px; }
+    .book-sheet__sub { display: grid; gap: 2px; margin: -10px 0 0; }
+    .book-sheet__when { font-variant-numeric: tabular-nums; }
+    .book-sheet__left { font-size: 13px; font-weight: 600; color: var(--text); }
+    .book-sheet__sub.is-full .book-sheet__left { color: var(--warning); }
+    #book-sheet .players-status { margin: 8px 0 0; }
+    #book-sheet .players-status:not(:empty) { margin-block-end: var(--space-2); }
+    .book-list { margin-top: var(--space-1); }
+    .book-row {
+      display: flex; align-items: center; gap: 12px; width: 100%;
+      min-height: 56px; padding: 8px 0; border: 0;
+      border-bottom: 1px solid var(--border);
+      background: transparent; color: inherit; font: inherit;
+      text-align: start; cursor: pointer;
+    }
+    .book-row:last-child { border-bottom: 0; }
+    .book-row:active { opacity: .6; }
+    .book-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+    .book-row[aria-disabled="true"] { cursor: default; }
+    .book-row .avatar { width: 36px; height: 36px; font-size: 14px; flex: none; }
+    .book-row__text { flex: 1; min-width: 0; }
+    .book-row__name {
+      display: block; font-size: 14px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .book-row[aria-disabled="true"] .book-row__name { color: var(--text-3); }
+    .book-row__meta {
+      display: block; margin-top: 1px; font-size: 12px; color: var(--text-3);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .book-row__action { flex: none; font-size: 13px; font-weight: 500; color: var(--accent-ink); }
+    .quote-card {
+      margin-top: var(--space-6); padding: var(--space-4);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .quote-card__label {
+      font-size: 11px; font-weight: 600; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--text-3); margin-bottom: 8px;
+    }
+    .quote-card blockquote {
+      margin: 0; font-size: 14px; line-height: 1.5; font-weight: 400; color: var(--text-2);
+    }
+    .quote-card cite {
+      display: block; margin-top: 10px; font-size: 12px;
+      font-style: normal; font-weight: 500; color: var(--text-3);
+    }
+
+    .public-profile { display: flex; align-items: flex-start; gap: 14px; }
+    .public-profile > .avatar { width: 56px; height: 56px; font-size: 20px; }
+    .public-profile__text { flex: 1; min-width: 0; }
+    .public-profile__name { font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+    .public-profile__about {
+      font-size: 14px; line-height: 1.45; margin-top: 10px; color: var(--text-2);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .skeleton {
+      height: 104px; border-radius: var(--radius);
+      background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
+      background-size: 400% 100%; animation: sk 1.3s ease infinite;
+    }
+    .skeleton + .skeleton { margin-top: 12px; }
+    .skeleton--row { width: 100%; height: 46px; border-radius: var(--radius-sm); }
+    .skeleton--row + .skeleton--row { margin-top: 8px; }
+    .coach-row .skeleton { flex: 1; }
+
+    /* ===== Загрузка в духе loading.dev: тонкая дуга + мяч с двумя точками ===== */
+    .loading-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; padding: 42px 16px; color: var(--text-3);
+      font-size: 13px; text-align: center;
+    }
+    .squash-loader {
+      position: relative; width: 44px; height: 44px; display: block; color: var(--text-3);
+    }
+    .squash-loader__ring {
+      width: 44px; height: 44px; display: block; overflow: visible;
+      animation: squash-arc 1.15s linear infinite;
+    }
+    .squash-loader__ball {
+      position: absolute; left: 14px; top: 14px; width: 16px; height: 16px;
+      border: 1.5px solid currentColor; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; gap: 2px;
+    }
+    .squash-loader__dot {
+      width: 4px; height: 4px; border-radius: 50%; background: var(--warning);
+    }
+    @keyframes squash-arc { to { transform: rotate(360deg); } }
+    @keyframes sk { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+    [hidden] { display: none !important; }
+
+    @media (max-width: 420px) {
+      .reminder-offset { align-items: flex-start; flex-wrap: wrap; }
+      .reminder-offset > .hint { flex: 1 0 100%; }
+      .reminder-offset .hm { margin-left: 0; }
+    }
+    /* Сильное увеличение/очень узкий экран: не ломаем сетку, а перестраиваем. */
+    @media (max-width: 340px) {
+      html { scroll-padding-top: 56px; }
+      .app-header { padding-left: 10px; padding-right: 10px; gap: 8px; }
+      .app-title { font-size: 20px; }
+      .header-action { width: 34px; height: 34px; }
+      .app-main { padding: 12px 10px calc(var(--tabbar-h) + 20px + var(--safe-bottom)); }
+      .card { padding: 12px; border-radius: 16px; }
+      .section-title { font-size: 11px; }
+      .profile-card__top { align-items: flex-start; gap: var(--space-2); }
+      .profile-card__text { flex: 1; }
+      .profile-actions { flex-direction: column; }
+      .segmented { display: grid; grid-template-columns: 1fr 1fr; }
+      .segmented button { font-size: 11px; }
+      .row2 { grid-template-columns: 1fr; gap: 0; }
+      .btn { padding-inline: 12px; }
+      .icon-btn { width: 34px; height: 34px; }
+      .t-actions { flex-direction: column; }
+      .quick-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .level { white-space: normal; }
+      .t-coach { flex-wrap: wrap; }
+      .t-coach__text { flex: 1 1 calc(100% - 42px); }
+      .t-coach__action { margin-left: 42px; }
+      .badge { max-width: 100%; white-space: normal; }
+      .reminder-row, .setting-row, .inline-row { flex-wrap: wrap; }
+      .reminder-row .switch, .setting-row .switch, .inline-row .switch { margin-left: auto; }
+      .hm { flex-wrap: wrap; }
+      .p-row, .coach-item { flex-wrap: wrap; }
+      .p-row > div:last-child, .coach-item__actions { margin-left: 42px; }
+      .coach-item__text { flex: 1 1 calc(100% - 42px); }
+      .coach-item__meta { white-space: normal; }
+      .tab { font-size: 10px; }
+      .toast { max-width: 96%; }
+      .sheet__panel { padding-left: 12px; padding-right: 12px; }
+    }
+    @media (min-width: 341px) and (max-width: 360px) {
+      .row2 { grid-template-columns: 1fr; gap: 0; }
+      .app-header { padding-left: 14px; padding-right: 14px; }
+      .app-main { padding-left: 14px; padding-right: 14px; }
+      .segmented button { font-size: 11px; }
+    }
+    /* 300%+ zoom / панель уже 220px: ещё плотнее, без горизонтального скролла. */
+    @media (max-width: 220px) {
+      .app-main { padding: 8px 6px calc(var(--tabbar-h) + 16px + var(--safe-bottom)); }
+      .card { padding: 10px; border-radius: 12px; }
+      .app-header { gap: 4px; padding-left: 8px; padding-right: 8px; }
+      .app-header__right { gap: 4px; }
+      .app-title { font-size: 16px; }
+      .header-action { width: 28px; height: 28px; }
+      .section-title { font-size: 10px; }
+      .segmented { padding: 2px; gap: 2px; }
+      .segmented button { min-height: 30px; font-size: 10px; }
+      .t-time { font-size: 19px; }
+      .t-title { font-size: 15px; }
+      .t-meta, .t-names, .level { font-size: 12px; }
+      .icon-btn { width: 30px; height: 30px; }
+      .btn { font-size: 12px; }
+      .btn--sm { font-size: 11px; }
+      .badge { font-size: 10px; padding: 3px 6px; }
+      .quick { font-size: 10px; min-height: 52px; }
+      .coach-item__name { gap: 4px; }
+      .reminder-input { width: 52px; }
+      .profile-card__top { gap: var(--space-2); }
+      .t-coach__text { flex-basis: calc(100% - 36px); }
+      .t-coach__action { margin-left: 36px; }
+      .p-row > div:last-child, .coach-item__actions { margin-left: 36px; }
+      .tab { font-size: 9px; }
+      .tab svg { width: 18px; height: 18px; }
+      .toast { font-size: 12px; }
+      .onboarding-list li { font-size: 12px; }
+      .quote-card blockquote { font-size: 12.5px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+      .btn:active, .header-action:active, .chip:active { transform: none; }
+      .squash-loader__ring { animation: none; }
+      .header-action.is-loading svg { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-loader" id="app-loader" role="status" aria-live="polite">
+    <span class="squash-loader" aria-hidden="true">
+      <svg class="squash-loader__ring" viewBox="0 0 44 44" fill="none">
+        <circle cx="22" cy="22" r="18" stroke="currentColor" stroke-opacity=".16" stroke-width="2"/>
+        <circle cx="22" cy="22" r="18" style="stroke:var(--accent)" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 89"/>
+      </svg>
+      <span class="squash-loader__ball">
+        <span class="squash-loader__dot"></span>
+        <span class="squash-loader__dot"></span>
+      </span>
+    </span>
+    <div class="app-loader__caption">Загружаем…</div>
+  </div>
+  <div class="app-auth-error" id="app-auth-error" hidden role="alert">
+    <div class="card">
+      <div class="profile-card__name">Не удалось открыть приложение</div>
+      <p class="hint" id="app-auth-error-text">Telegram не передал данные авторизации. Закройте мини-приложение и откройте его снова.</p>
+      <button class="btn btn--primary btn--block" id="app-auth-retry" type="button">Повторить</button>
+    </div>
+  </div>
+  <div class="app">
+    <header class="app-header">
+      <h1 class="app-title">{% block header %}Сквош{% endblock %}</h1>
+      <div class="app-header__right">
+        <button class="header-action header-action--ghost" id="refresh-btn"
+                type="button" aria-label="Обновить данные" title="Обновить">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+            <path d="M21 3v5h-5"/>
+          </svg>
+        </button>
+        <button class="header-action header-action--ghost" id="feedback-btn"
+                type="button" aria-label="Сообщить о проблеме или предложить улучшение"
+                title="Обратная связь">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.5 15.5a2.5 2.5 0 0 1-2.5 2.5H8.8L4 21v-14.5A2.5 2.5 0 0 1 6.5 4H18a2.5 2.5 0 0 1 2.5 2.5v9Z"/>
+            <path d="M12 8.2v4.2"/><path d="M12 15.5h.01"/>
+          </svg>
+        </button>
+        {% block header_right %}{% endblock %}
+      </div>
+    </header>
+    <main class="app-main">{% block content %}{% endblock %}</main>
+  </div>
+
+  <!-- Нижняя навигация -->
+  <nav class="tabbar">
+    <a class="tab" href="/" data-tab="player">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4.5" width="18" height="16" rx="3.5"/><path d="M8 2.8v3.4M16 2.8v3.4M3.2 9.5h17.6"/>
+      </svg>
+      <span>Тренировки</span>
+    </a>
+    <a class="tab" href="/match" data-tab="match" id="tab-match">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="8.5"/><path d="M7 17.5 17 6.5M8.5 6.5l7 11"/>
+      </svg>
+      <span>Матч</span>
+    </a>
+    <a class="tab" href="/coach" data-tab="coach" id="tab-coach">
+      <span class="tab__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3.2a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8"/><path d="M4.5 20.8v-.9a7.5 7.5 0 0 1 15 0v.9"/>
+        </svg>
+        <span class="tab__pin" id="tab-coach-pin" hidden></span>
+      </span>
+      <span>Тренер</span>
+    </a>
+  </nav>
+
+  <!-- Полноэкранный турнир: локальная сборка squashtabs, без внешних сайтов -->
+  <div class="tabs-overlay" id="tabs-overlay" hidden>
+    <div class="tabs-overlay__bar">
+      <button type="button" class="tabs-overlay__close" id="tabs-close" aria-label="Закрыть турнир">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 5l-7 7 7 7"/>
+        </svg>
+      </button>
+      <span class="tabs-overlay__title">Турнир</span>
+      <code class="tabs-overlay__code" id="tabs-code"></code>
+      <button type="button" class="tabs-overlay__close" id="tabs-share" aria-label="Поделиться турниром"
+              aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/>
+          <path d="M8.4 10.7l7.2-4.2M8.4 13.3l7.2 4.2"/>
+        </svg>
+      </button>
+    </div>
+    <div class="tabs-menu" id="tabs-share-menu" role="menu" hidden>
+      <button type="button" class="tabs-menu__item" role="menuitem" data-share-role="viewer">
+        <span>Для игроков</span>
+        <span class="tabs-menu__hint">только смотреть</span>
+      </button>
+      <button type="button" class="tabs-menu__item" role="menuitem" data-share-role="judge">
+        <span>Для судьи</span>
+        <span class="tabs-menu__hint">можно вносить счёт</span>
+      </button>
+      <button type="button" class="tabs-menu__item" role="menuitem" data-copy-code>
+        <span>Скопировать код</span>
+        <span class="tabs-menu__hint" id="tabs-menu-code"></span>
+      </button>
+    </div>
+    <iframe id="tabs-frame" title="Турнир: сетка и судейство" src="about:blank"
+            allow="clipboard-write"></iframe>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Bottom sheet: добавление в календарь (общий для страниц) -->
+  <div class="sheet" id="cal-sheet">
+    <div class="sheet__backdrop" data-cal-close></div>
+    <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="cal-title">
+      <div class="sheet__handle"></div>
+      <h2 class="sheet__title" id="cal-title">Добавить в календарь</h2>
+      <div class="hint" id="cal-when" style="margin:-6px 0 16px"></div>
+      <button class="btn btn--primary btn--block" id="cal-ics" style="margin-bottom:10px">Скачать .ics (Apple / Android)</button>
+      <button class="btn btn--block" id="cal-google">Google Календарь</button>
+    </div>
+  </div>
+
+  <!-- Bottom sheet: обратная связь -->
+  <div class="sheet" id="feedback-sheet">
+    <div class="sheet__backdrop" data-feedback-close></div>
+    <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
+      <div class="sheet__handle"></div>
+      <h2 class="sheet__title" id="feedback-title" tabindex="-1">Обратная связь</h2>
+      <p class="hint" style="margin:-8px 0 16px">Нашли баг или есть идея? Напишите — это поможет сделать приложение лучше.</p>
+      <span class="label">Тип сообщения</span>
+      <div class="segmented" id="feedback-kind" role="group" aria-label="Тип сообщения">
+        <button type="button" data-feedback-kind="bug" class="is-active" aria-pressed="true">Проблема</button>
+        <button type="button" data-feedback-kind="idea" aria-pressed="false">Предложение</button>
+      </div>
+      <label class="field">
+        <span class="label">Что случилось или что улучшить</span>
+        <textarea class="input" id="feedback-text" rows="5" maxlength="1500"
+                  placeholder="Опишите, что произошло или что стоит изменить"></textarea>
+        <span class="hint hint--tight" id="feedback-count">0 / 1500</span>
+      </label>
+      <p class="hint hint--tight form-note">Telegram ID в сообщении не передаётся.</p>
+      <button class="btn btn--primary btn--block" id="feedback-send" type="button">Отправить</button>
+    </div>
+  </div>
+
+  <!-- Bottom sheet: публичный профиль игрока -->
+  <div class="sheet" id="public-profile-sheet">
+    <div class="sheet__backdrop" data-public-profile-close></div>
+    <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="public-profile-title">
+      <div class="sheet__handle"></div>
+      <h2 class="sheet__title" id="public-profile-title">Профиль игрока</h2>
+      <div id="public-profile-content"></div>
+      <button class="btn btn--block" id="public-profile-close" type="button" style="margin-top:16px">Закрыть</button>
+    </div>
+  </div>
+
+  <!-- Локальная копия: не блокирует первую отрисовку и не зависит от telegram.org. -->
+  <script src="/static/telegram-web-app.js"></script>
+  <script>
+    const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    if (tg) {
+      try {
+        tg.ready(); tg.expand();
+        tg.setHeaderColor && tg.setHeaderColor('bg_color');
+        tg.setBackgroundColor && tg.setBackgroundColor('bg_color');
+        tg.enableClosingConfirmation && tg.enableClosingConfirmation();
+      } catch (e) { /* старые версии клиента */ }
+    }
+
+    // Telegram раскрывает мини-приложение анимацией: высота WebView меняется
+    // уже после первой отрисовки, и Chrome «удерживает якорь» — страница
+    // открывается уже прокрученной, без верха карточки. Пока человек сам не
+    // начал листать, возвращаем верх после каждого такого изменения.
+    let USER_SCROLLED = false;
+    ['touchstart', 'wheel', 'keydown'].forEach((type) => {
+      window.addEventListener(type, () => { USER_SCROLLED = true; },
+        { passive: true, once: true });
+    });
+    function pinTopWhileOpening() {
+      if (!USER_SCROLLED) scrollAppToTop();
+    }
+    try {
+      tg && tg.onEvent && tg.onEvent('viewportChanged', pinTopWhileOpening);
+    } catch (e) { /* старые версии клиента */ }
+    [0, 120, 300, 700].forEach((ms) => setTimeout(pinTopWhileOpening, ms));
+
+    function syncTheme() {
+      const scheme = (tg && tg.colorScheme) ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.dataset.theme = scheme;
+    }
+    syncTheme();
+    try { tg && tg.onEvent && tg.onEvent('themeChanged', syncTheme); } catch (e) {}
+
+    // initData строго из Telegram Web App.
+    const fromTg = tg ? (tg.initData || '') : '';
+    {% if allow_dev_init_data %}
+    // DEV-режим (ALLOW_DEV_INIT_DATA=true): локальное превью вне Telegram.
+    // Подпись всё равно проверяется на сервере HMAC-SHA256 — подделать нельзя.
+    const fromUrl = new URLSearchParams(location.search).get('initData') || '';
+    const fromStore = sessionStorage.getItem('initData') || '';
+    const INIT_DATA = fromTg || fromUrl || fromStore;
+    if (INIT_DATA) sessionStorage.setItem('initData', INIT_DATA);
+    {% else %}
+    const INIT_DATA = fromTg;
+    {% endif %}
+    const DEV_INIT_DATA_ENABLED = {% if allow_dev_init_data %}true{% else %}false{% endif %};
+
+    function haptic(style) {
+      try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(style || 'light'); } catch (e) {}
+    }
+    function hapticNotify(kind) {
+      try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch (e) {}
+    }
+
+    function toast(message, action) {
+      const el = document.getElementById('toast');
+      el.innerHTML = '';
+      const text = document.createElement('span');
+      text.textContent = message;
+      el.appendChild(text);
+      if (action) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'toast__action';
+        btn.textContent = action.label;
+        btn.addEventListener('click', () => {
+          el.classList.remove('is-show');
+          clearTimeout(el._t);
+          action.onClick();
+        });
+        el.appendChild(btn);
+      }
+      el.classList.add('is-show');
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.classList.remove('is-show'), action ? 5200 : 2600);
+    }
+
+    // Обновление данных без перезагрузки WebView (страница сама решает, что тянуть).
+    const refreshButton = document.getElementById('refresh-btn');
+    if (refreshButton) {
+      refreshButton.addEventListener('click', async () => {
+        if (refreshButton.classList.contains('is-loading')) return;
+        refreshButton.classList.add('is-loading');
+        refreshButton.setAttribute('aria-busy', 'true');
+        haptic('light');
+        try {
+          if (typeof window.PAGE_REFRESH === 'function') {
+            await window.PAGE_REFRESH();
+          } else {
+            location.reload();
+            return;
+          }
+        } catch (e) {
+          hapticNotify('error');
+          toast(e.message || 'Не удалось обновить данные');
+        } finally {
+          refreshButton.classList.remove('is-loading');
+          refreshButton.removeAttribute('aria-busy');
+        }
+      });
+    }
+
+    // ===== Шторки: фиксируем страницу под открытой шторкой =====
+    // Без этого палец на затемнении прокручивает фон, а после закрытия
+    // карточка оказывается не там, где была (на телефоне это выглядит как
+    // «вёрстка съехала»). Позицию запоминаем: iOS сбрасывает её при
+    // переключении overflow у html.
+    let SHEET_SCROLL_Y = 0;
+    function syncSheetScrollLock() {
+      const open = Boolean(document.querySelector('.sheet.is-open'));
+      const locked = document.documentElement.classList.contains('has-sheet');
+      if (open === locked) return;
+      if (open) {
+        SHEET_SCROLL_Y = window.scrollY || 0;
+        document.documentElement.classList.add('has-sheet');
+      } else {
+        document.documentElement.classList.remove('has-sheet');
+        window.scrollTo(0, SHEET_SCROLL_Y);
+      }
+    }
+    try {
+      const sheetObserver = new MutationObserver(syncSheetScrollLock);
+      document.querySelectorAll('.sheet').forEach((el) =>
+        sheetObserver.observe(el, { attributes: true, attributeFilter: ['class'] }));
+    } catch (e) {}
+
+    function currentInitData() {
+      return (tg && tg.initData) || INIT_DATA;
+    }
+
+    async function waitForInitData() {
+      if (currentInitData() || !tg) return;
+      // В Telegram WebView initData иногда появляется на мгновение позже
+      // первого тика скрипта. Не отправляем заведомо неавторизованные запросы.
+      for (let i = 0; i < 10 && !currentInitData(); i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    async function api(path, method = 'GET', body = null) {
+      await waitForInitData();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const res = await fetch(path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Init-Data': currentInitData(),
+          },
+          body: body ? JSON.stringify(body) : null,
+          signal: controller.signal,
+        });
+        let data = {};
+        try { data = await res.json(); } catch (e) {}
+        if (!res.ok) {
+          const err = new Error(data.error || data.detail || ('Ошибка ' + res.status));
+          err.status = res.status;
+          err.data = data;
+          throw err;
+        }
+        return data;
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          throw new Error('Превышено время ожидания. Нажмите «Обновить».');
+        }
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    function usernameLink(username) {
+      const value = String(username || '').replace(/^@/, '');
+      if (!/^[A-Za-z0-9_]{1,32}$/.test(value)) return esc(username || '');
+      return `<a href="https://t.me/${encodeURIComponent(value)}" data-telegram-username="${esc(value)}" target="_blank" rel="noopener noreferrer">@${esc(value)}</a>`;
+    }
+    document.addEventListener('click', e => {
+      const link = e.target.closest('[data-telegram-username]');
+      if (link && tg && typeof tg.openTelegramLink === 'function') {
+        e.preventDefault();
+        tg.openTelegramLink(link.href);
+      }
+    });
+
+    // Короткий session-cache для мгновенного повторного открытия страниц.
+    // Он живёт только в текущей сессии WebView и сбрасывается после действий.
+    const CACHE_TTL_MS = 30000;
+    const CACHE_PREFIX = 'sqassit:cache:';
+    function cacheUserKey() {
+      try {
+        const user = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+        return user && user.id ? String(user.id) : 'anon';
+      } catch (e) { return 'anon'; }
+    }
+    function cacheRead(name) {
+      try {
+        const raw = sessionStorage.getItem(
+          CACHE_PREFIX + name + ':' + cacheUserKey()
+        );
+        if (!raw) return null;
+        const entry = JSON.parse(raw);
+        if (!entry || Date.now() - entry.t > CACHE_TTL_MS) return null;
+        return entry.v;
+      } catch (e) { return null; }
+    }
+    function cacheWrite(name, value) {
+      try {
+        sessionStorage.setItem(
+          CACHE_PREFIX + name + ':' + cacheUserKey(),
+          JSON.stringify({ t: Date.now(), v: value })
+        );
+      } catch (e) { /* приватный режим / переполнение */ }
+    }
+    function cacheClear() {
+      try {
+        const keys = [];
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key && key.startsWith(CACHE_PREFIX)) keys.push(key);
+        }
+        keys.forEach(key => sessionStorage.removeItem(key));
+      } catch (e) { /* ignore */ }
+    }
+
+    // Разметка загрузки: один и тот же мяч на всех экранах.
+    function loaderHtml(text) {
+      return `<div class="loading-state" role="status" aria-live="polite">
+        <span class="squash-loader" aria-hidden="true">
+          <svg class="squash-loader__ring" viewBox="0 0 44 44" fill="none">
+            <circle cx="22" cy="22" r="18" stroke="currentColor" stroke-opacity=".16" stroke-width="2"/>
+            <circle cx="22" cy="22" r="18" style="stroke:var(--accent)" stroke-width="2" stroke-linecap="round" stroke-dasharray="24 89"/>
+          </svg>
+          <span class="squash-loader__ball">
+            <span class="squash-loader__dot"></span>
+            <span class="squash-loader__dot"></span>
+          </span>
+        </span>
+        <span>${esc(text || 'Загрузка…')}</span>
+      </div>`;
+    }
+
+    // Дата в карточке: «Сегодня, 29 окт» или «пт, 30 окт». День недели
+    // рядом с «Сегодня» — шум, он уже понятен из первого слова.
+    function fmtDate(iso) {
+      const d = new Date(iso + 'T00:00:00');
+      const t = new Date();
+      const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      const diff = Math.round((d - today) / 86400000);
+      const base = d.getDate() + ' ' + MONTHS[d.getMonth()];
+      if (diff === 0) return 'Сегодня, ' + base;
+      if (diff === 1) return 'Завтра, ' + base;
+      return WD[d.getDay()] + ', ' + base;
+    }
+
+    // Дата и уровень без висящего разделителя при переносе строки.
+    function dateAndLevel(date, level) {
+      return `<span>${esc(fmtDate(date))}</span>${level ? levelPill(level) : ''}`;
+    }
+
+    // Уровень игры: мягкая пилюля, цвет говорит о сложности.
+    function levelPill(level) {
+      if (!level) return '';
+      const label = String(level).trim();
+      const s = label.toLowerCase();
+      const tone = s.includes('уверен') ? 'orange'
+        : s.includes('начин') ? 'green'
+          : s.includes('нович') ? 'white' : 'muted';
+      return `<span class="badge level level--${tone}">${esc(label)}</span>`;
+    }
+
+    // День в списке: слева «Сегодня»/«Завтра»/день недели, справа дата.
+    function dayLabelParts(iso) {
+      const d = new Date(iso + 'T00:00:00');
+      const t = new Date();
+      const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      const diff = Math.round((d - today) / 86400000);
+      const rel = diff === 0 ? 'Сегодня' : diff === 1 ? 'Завтра' : WD[d.getDay()];
+      return { rel, date: d.getDate() + ' ' + MONTHS[d.getMonth()] };
+    }
+
+    // Аватар: цветной круг с инициалом; картинка грузится поверх, при ошибке удаляется.
+    // Для анонимного режима передаётся emoji животного. id нужен, чтобы
+    // повторное обновление профиля не теряло контейнер.
+    // Турнир — переход не в другое приложение, а в полноэкранный слой
+    // с локальной сборкой squashtabs. Одна разметка для занятий и матчей.
+    function tournamentRow(id) {
+      return `
+      <button type="button" class="list-action tournament-row" data-tournament="${id}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 4h8v4.5a4 4 0 0 1-8 0V4Z"/>
+          <path d="M8 5H5.5v1.5A3.5 3.5 0 0 0 9 10M16 5h2.5v1.5A3.5 3.5 0 0 1 15 10"/>
+          <path d="M12 12.5V16M9.5 20h5M10.5 20v-2.5h3V20"/>
+        </svg>
+        <span class="list-action__text">
+          <span>Турнир</span>
+          <span class="list-action__hint">сетка и судейство</span>
+        </span>
+        <svg class="list-action__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 18l6-6-6-6"/>
+        </svg>
+      </button>`;
+    }
+
+    function avatarHtml(name, url, small, emoji, id) {
+      const idAttr = id ? ` id="${esc(id)}"` : '';
+      if (emoji) {
+        return `<span${idAttr} class="avatar avatar--animal ${small ? 'avatar--sm' : ''}" aria-label="${esc(name)}">${esc(emoji)}</span>`;
+      }
+      const initial = esc((name || '?').trim().charAt(0).toUpperCase());
+      return `<span${idAttr} class="avatar ${small ? 'avatar--sm' : ''}">${initial}` +
+             `<img src="${esc(url)}" alt="" loading="lazy" decoding="async" onerror="this.remove()"></span>`;
+    }
+
+    // Публичный профиль игрока: имя/животное, фото и «о себе».
+    const publicProfileSheet = document.getElementById('public-profile-sheet');
+    const publicProfileContent = document.getElementById('public-profile-content');
+
+    function closePlayerProfile() {
+      publicProfileSheet.classList.remove('is-open');
+    }
+
+    async function openPlayerProfile(token) {
+      if (!token) return;
+      publicProfileSheet.classList.add('is-open');
+      publicProfileContent.innerHTML = loaderHtml('Загружаем профиль…');
+      haptic('light');
+      try {
+        const data = await api('/api/players/' + encodeURIComponent(token));
+        const p = data.profile;
+        const username = p.username ? '<div class="hint">' + usernameLink(p.username) + '</div>' : '';
+        publicProfileContent.innerHTML = `
+          <div class="public-profile">
+            ${avatarHtml(p.first_name, p.avatar_url, false, p.avatar_emoji)}
+            <div class="public-profile__text">
+              <div class="public-profile__name">${esc(p.first_name)}</div>
+              ${username}
+              <div class="public-profile__about">${esc(p.about || 'Описание пока не заполнено.')}</div>
+            </div>
+          </div>`;
+      } catch (e) {
+        publicProfileContent.innerHTML = `<div class="hint" style="padding:12px 0">${esc(e.message)}</div>`;
+      }
+    }
+
+    document.querySelector('[data-public-profile-close]').addEventListener('click', closePlayerProfile);
+    document.getElementById('public-profile-close').addEventListener('click', closePlayerProfile);
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') closePlayerProfile();
+    });
+
+    // Даты по-русски.
+    const MONTHS = ['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'];
+    const WD = ['вс','пн','вт','ср','чт','пт','сб'];
+    function fmtDay(iso) {
+      const d = new Date(iso + 'T00:00:00');
+      const t = new Date();
+      const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      const diff = Math.round((d - today) / 86400000);
+      const base = WD[d.getDay()] + ', ' + d.getDate() + ' ' + MONTHS[d.getMonth()];
+      if (diff === 0) return 'Сегодня · ' + base;
+      if (diff === 1) return 'Завтра · ' + base;
+      return base;
+    }
+
+    // «270» -> «4 ч 30 мин»
+    function fmtOffset(min) {
+      min = Math.max(0, parseInt(min, 10) || 0);
+      const h = Math.floor(min / 60), m = min % 60, parts = [];
+      if (h) parts.push(h + ' ч');
+      if (m) parts.push(m + ' мин');
+      return parts.length ? parts.join(' ') : '0 мин';
+    }
+
+    // Секунды -> «2 ч 15 мин»
+    function fmtDuration(seconds) {
+      const totalMin = Math.max(0, Math.round((parseInt(seconds, 10) || 0) / 60));
+      const h = Math.floor(totalMin / 60), m = totalMin % 60, parts = [];
+      if (h) parts.push(h + ' ч');
+      if (m) parts.push(m + ' мин');
+      return parts.length ? parts.join(' ') : 'меньше минуты';
+    }
+
+    // ===== Добавление в календарь =====
+    const calSheet = document.getElementById('cal-sheet');
+    let CAL = null;
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function toGCal(epoch) {
+      const d = new Date(epoch * 1000);
+      return d.getUTCFullYear() + pad2(d.getUTCMonth() + 1) + pad2(d.getUTCDate()) +
+        'T' + pad2(d.getUTCHours()) + pad2(d.getUTCMinutes()) + pad2(d.getUTCSeconds()) + 'Z';
+    }
+    // ===== Турнир (squashtabs) =====
+    // Код комнаты выдаёт сервер. В приложении открываем как организатора,
+    // ссылки для игроков и судей фиксируют роль через #role=…
+    const tabsOverlay = document.getElementById('tabs-overlay');
+    const tabsFrame = document.getElementById('tabs-frame');
+    const tabsCode = document.getElementById('tabs-code');
+    const tabsMenu = document.getElementById('tabs-share-menu');
+    const tabsMenuCode = document.getElementById('tabs-menu-code');
+    const tabsShareBtn = document.getElementById('tabs-share');
+    let tabsRoom = '';
+    let tabsTrigger = null;
+
+    function isTabsOpen() { return !tabsOverlay.hidden; }
+
+    function openTournamentRoom(code, names) {
+      tabsRoom = String(code || '');
+      tabsCode.textContent = tabsRoom;
+      tabsMenuCode.textContent = tabsRoom;
+      const roster = (Array.isArray(names) ? names : [])
+        .map(n => String(n || '').trim()).filter(Boolean);
+      const hash = 'room=' + encodeURIComponent(tabsRoom) + '&role=owner' +
+        (roster.length ? '&names=' + encodeURIComponent(roster.join('|')) : '');
+      tabsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      tabsFrame.src = '/tabs#' + hash;
+      tabsOverlay.hidden = false;
+      tabsMenu.hidden = true;
+      tabsShareBtn.setAttribute('aria-expanded', 'false');
+      document.documentElement.classList.add('has-tabs');
+      try { tg && tg.BackButton && tg.BackButton.show(); } catch (e) {}
+      haptic('light');
+      document.getElementById('tabs-close').focus();
+    }
+
+    function closeTabs() {
+      tabsOverlay.hidden = true;
+      tabsMenu.hidden = true;
+      tabsShareBtn.setAttribute('aria-expanded', 'false');
+      tabsFrame.src = 'about:blank';
+      tabsCode.textContent = '';
+      tabsMenuCode.textContent = '';
+      tabsRoom = '';
+      document.documentElement.classList.remove('has-tabs');
+      try { tg && tg.BackButton && tg.BackButton.hide(); } catch (e) {}
+      if (tabsTrigger) tabsTrigger.focus();
+      tabsTrigger = null;
+    }
+
+    async function shareTabsLink(role) {
+      const url = location.origin + '/tabs#room=' + encodeURIComponent(tabsRoom) +
+        '&role=' + encodeURIComponent(role);
+      const text = 'Турнир: сетка и счёт';
+      tabsMenu.hidden = true;
+      tabsShareBtn.setAttribute('aria-expanded', 'false');
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'Турнир', text, url });
+          return;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return;
+        }
+      }
+      try {
+        if (tg && tg.openTelegramLink) {
+          tg.openTelegramLink(
+            'https://t.me/share/url?url=' + encodeURIComponent(url) +
+            '&text=' + encodeURIComponent(text));
+          return;
+        }
+      } catch (e) {}
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Ссылка скопирована');
+      } catch (e) {
+        toast('Не удалось скопировать ссылку');
+      }
+    }
+
+    async function copyTabsCode() {
+      tabsMenu.hidden = true;
+      tabsShareBtn.setAttribute('aria-expanded', 'false');
+      try {
+        await navigator.clipboard.writeText(tabsRoom);
+        toast('Код скопирован');
+      } catch (e) {
+        toast('Код: ' + tabsRoom);
+      }
+    }
+
+    document.getElementById('tabs-close').addEventListener('click', closeTabs);
+    tabsShareBtn.addEventListener('click', () => {
+      const open = tabsMenu.hidden;
+      tabsMenu.hidden = !open;
+      tabsShareBtn.setAttribute('aria-expanded', String(open));
+    });
+    tabsMenu.addEventListener('click', (ev) => {
+      const role = ev.target.closest('[data-share-role]')?.getAttribute('data-share-role');
+      if (role) { shareTabsLink(role); return; }
+      if (ev.target.closest('[data-copy-code]')) copyTabsCode();
+    });
+    document.addEventListener('click', (ev) => {
+      if (tabsMenu.hidden) return;
+      if (ev.target.closest('#tabs-share-menu, #tabs-share')) return;
+      tabsMenu.hidden = true;
+      tabsShareBtn.setAttribute('aria-expanded', 'false');
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      if (!tabsMenu.hidden) {
+        tabsMenu.hidden = true;
+        tabsShareBtn.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      if (isTabsOpen()) closeTabs();
+    });
+    try {
+      tg && tg.BackButton && tg.BackButton.onClick(() => { if (isTabsOpen()) closeTabs(); });
+    } catch (e) {}
+
+    function openExternal(url) {
+      try { if (tg && tg.openLink) { tg.openLink(url); return; } } catch (e) {}
+      window.open(url, '_blank');
+    }
+    function fmtCalWhen(epoch, durMin) {
+      const d = new Date(epoch * 1000);
+      const dateStr = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+      const t1 = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      const t2 = new Date((epoch + (durMin || 60) * 60) * 1000)
+        .toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      return dateStr + ', ' + t1 + '–' + t2;
+    }
+    function openCalendar(id, summary, startEpoch, durationMin, icsToken) {
+      CAL = { id, summary, startEpoch, durationMin, icsToken };
+      document.getElementById('cal-title').textContent = summary || 'Тренировка';
+      document.getElementById('cal-when').textContent = fmtCalWhen(startEpoch, durationMin);
+      calSheet.classList.add('is-open');
+      haptic('light');
+    }
+    function closeCalendar() { calSheet.classList.remove('is-open'); }
+    document.querySelector('[data-cal-close]').addEventListener('click', closeCalendar);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCalendar(); });
+    document.getElementById('cal-ics').addEventListener('click', () => {
+      if (!CAL) return;
+      // Узкий токен из API (не полный initData): ссылка открывается обычной
+      // навигацией, где нельзя передать заголовок X-Init-Data.
+      let query;
+      if (CAL.icsToken) {
+        query = '?token=' + encodeURIComponent(CAL.icsToken);
+      } else if (DEV_INIT_DATA_ENABLED) {
+        query = '?initData=' + encodeURIComponent(INIT_DATA);
+      } else {
+        toast('Не удалось подготовить ссылку. Обновите страницу.');
+        return;
+      }
+      openExternal(`${location.origin}/calendar/${CAL.id}.ics${query}`);
+    });
+    document.getElementById('cal-google').addEventListener('click', () => {
+      if (!CAL) return;
+      const start = toGCal(CAL.startEpoch);
+      const end = toGCal(CAL.startEpoch + (CAL.durationMin || 60) * 60);
+      const params = new URLSearchParams({
+        action: 'TEMPLATE',
+        text: CAL.summary || 'Сквош-тренировка',
+        dates: start + '/' + end,
+        details: 'Запись через Telegram-бота сквош-тренировок',
+      });
+      openExternal('https://calendar.google.com/calendar/render?' + params.toString());
+    });
+
+    // ===== Обратная связь =====
+    const feedbackSheet = document.getElementById('feedback-sheet');
+    const feedbackText = document.getElementById('feedback-text');
+    const feedbackCount = document.getElementById('feedback-count');
+    const feedbackSend = document.getElementById('feedback-send');
+    let feedbackKind = 'bug';
+
+    function feedbackPageLabel() {
+      const path = location.pathname.replace(/\/+$/, '') || '/';
+      if (path === '/match') return 'Матч';
+      if (path === '/coach') return 'Тренер';
+      return 'Тренировки';
+    }
+
+    function updateFeedbackCount() {
+      feedbackCount.textContent = `${feedbackText.value.length} / 1500`;
+    }
+
+    function setFeedbackKind(kind) {
+      feedbackKind = kind;
+      document.querySelectorAll('[data-feedback-kind]').forEach(btn => {
+        const active = btn.dataset.feedbackKind === kind;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
+    function openFeedback() {
+      feedbackSheet.classList.add('is-open');
+      haptic('light');
+      setTimeout(() => document.getElementById('feedback-title').focus(), 150);
+    }
+
+    function closeFeedback() {
+      feedbackSheet.classList.remove('is-open');
+    }
+
+    document.getElementById('feedback-btn').addEventListener('click', openFeedback);
+    document.querySelector('[data-feedback-close]').addEventListener('click', closeFeedback);
+    document.querySelectorAll('[data-feedback-kind]').forEach(btn => {
+      btn.addEventListener('click', () => setFeedbackKind(btn.dataset.feedbackKind));
+    });
+    feedbackText.addEventListener('input', updateFeedbackCount);
+    feedbackSend.addEventListener('click', async () => {
+      const text = feedbackText.value.trim();
+      if (text.length < 3) {
+        toast('Опишите проблему или предложение чуть подробнее');
+        feedbackText.focus();
+        return;
+      }
+      feedbackSend.disabled = true;
+      try {
+        const result = await api('/api/feedback', 'POST', {
+          kind: feedbackKind,
+          text,
+          page: feedbackPageLabel(),
+        });
+        feedbackText.value = '';
+        updateFeedbackCount();
+        setFeedbackKind('bug');
+        closeFeedback();
+        hapticNotify('success');
+        toast(result.message || 'Спасибо! Сообщение отправлено.');
+      } catch (e) {
+        hapticNotify('error');
+        toast(e.message);
+      } finally {
+        feedbackSend.disabled = false;
+      }
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && feedbackSheet.classList.contains('is-open')) {
+        closeFeedback();
+      }
+    });
+
+    // Подсветка активной вкладки.
+    (function () {
+      const path = location.pathname.replace(/\/+$/, '') || '/';
+      document.querySelectorAll('.tab').forEach(a => {
+        const href = a.getAttribute('href');
+        if (href === path || (href === '/' && path === '')) {
+          a.classList.add('is-active');
+          a.setAttribute('aria-current', 'page');
+        }
+      });
+    })();
+
+    // Принудительный верх страницы: WebView/Telegram иногда восстанавливает
+    // scroll уже после первого тика скрипта.
+    function scrollAppToTop() {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
+    let initialScrollFixed = false;
+    function resetInitialScroll() {
+      if (initialScrollFixed) return;
+      initialScrollFixed = true;
+      scrollAppToTop();
+    }
+    window.addEventListener('pageshow', resetInitialScroll);
+    window.addEventListener('load', resetInitialScroll);
+    scrollAppToTop();
+
+    // Стартовый экран: прячем после первичной загрузки данных страницы.
+    const appLoaderStartedAt = Date.now();
+    function hideAppLoader() {
+      const loader = document.getElementById('app-loader');
+      if (!loader || loader.classList.contains('is-done')) return;
+      const delay = Math.max(0, 300 - (Date.now() - appLoaderStartedAt));
+      setTimeout(() => {
+        scrollAppToTop();
+        loader.classList.add('is-done');
+        setTimeout(() => loader.remove(), 350);
+      }, delay);
+    }
+    window.hideAppLoader = hideAppLoader;
+    // Страховка: даже при сбое страничного скрипта не оставляем пустой экран.
+    setTimeout(hideAppLoader, 12000);
+
+    function showAuthError(message) {
+      const box = document.getElementById('app-auth-error');
+      const text = document.getElementById('app-auth-error-text');
+      if (!box) return;
+      if (message) text.textContent = message;
+      box.hidden = false;
+      document.getElementById('app-auth-retry').onclick = () => location.reload();
+    }
+    window.showAuthError = showAuthError;
+
+    // Общий профиль. Вкладка «Тренер» видна всем: игрок может оставить заявку.
+    const APP = {
+      me: null,
+      ready: (async () => {
+        try {
+          const data = await api('/api/me');
+          APP.me = data.user;
+        } catch (e) {
+          APP.authError = e;
+          showAuthError(e && e.status === 401
+            ? 'Telegram не передал данные авторизации. Закройте мини-приложение и откройте его снова.'
+            : (e && e.message) || 'Не удалось загрузить профиль.');
+        }
+      })(),
+      async refresh() {
+        await APP.ready;
+        const data = await api('/api/me');
+        APP.me = data.user;
+        return APP.me;
+      },
+    };
+
+    // Индикатор на вкладке «Тренер»: есть новые заявки на занятия.
+    const coachPin = document.getElementById('tab-coach-pin');
+    const coachTab = document.getElementById('tab-coach');
+    function setCoachIndicator(count) {
+      if (!coachPin) return;
+      const n = Math.max(0, Number(count) || 0);
+      coachPin.hidden = n === 0;
+      coachPin.textContent = '';
+      if (coachTab) {
+        if (n) coachTab.setAttribute('aria-label', `Тренер, новых заявок: ${n}`);
+        else coachTab.removeAttribute('aria-label');
+      }
+    }
+    window.setCoachIndicator = setCoachIndicator;
+
+    async function refreshCoachIndicator() {
+      if (!APP.me || !APP.me.is_coach) {
+        setCoachIndicator(0);
+        return;
+      }
+      try {
+        const data = await api('/api/coach/pending');
+        setCoachIndicator(data.pending_count);
+      } catch (e) {
+        // Индикатор не должен мешать загрузке страницы.
+      }
+    }
+    window.refreshCoachIndicator = refreshCoachIndicator;
+
+    APP.ready.then(refreshCoachIndicator);
+    setInterval(() => { if (!document.hidden) refreshCoachIndicator(); }, 60000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshCoachIndicator();
+    });
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
