@@ -16,7 +16,7 @@ pub struct CoachInput {
 pub struct ManagerInput {
     enabled: bool,
 }
-fn manager(
+pub(crate) fn manager(
     profiles: &Profiles,
     db: &Connection,
     init: &str,

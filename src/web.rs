@@ -23,6 +23,7 @@ pub struct WebState {
     pub avatar: Option<(crate::avatar::AvatarCache, crate::telegram::TelegramClient)>,
     pub messages: Option<crate::messages::Messages>,
     pub match_api: crate::match_api::MatchApi,
+    pub applications: crate::applications::Applications,
 }
 
 fn render(template: &str, allow_dev_init_data: bool) -> Result<String, minijinja::Error> {
@@ -804,6 +805,49 @@ async fn registry_list(State(state): State<WebState>, headers: HeaderMap) -> Res
     })
     .await
 }
+async fn apply_status(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::applications::status(&p, &i, n)
+    })
+    .await
+}
+async fn apply_create(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::applications::ApplicationInput>,
+) -> Response {
+    let service = state.applications.clone();
+    profile_work(state, headers, move |p, i, n| {
+        service.apply(&p, &i, n, body)
+    })
+    .await
+}
+async fn applications_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::applications::list(&p, &i, n)
+    })
+    .await
+}
+async fn application_approve(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::applications::decide(&p, &i, n, id, true)
+    })
+    .await
+}
+async fn application_reject(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::applications::decide(&p, &i, n, id, false)
+    })
+    .await
+}
 async fn registry_add(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1164,6 +1208,16 @@ pub fn router(
         .route("/calendar/{filename}", get(api_calendar))
         .route("/api/coach/trainings", get(coach_list).post(coach_create))
         .route("/api/coach/coaches", get(registry_list).post(registry_add))
+        .route("/api/coach/apply", get(apply_status).post(apply_create))
+        .route("/api/coach/applications", get(applications_list))
+        .route(
+            "/api/coach/applications/{id}/approve",
+            post(application_approve),
+        )
+        .route(
+            "/api/coach/applications/{id}/reject",
+            post(application_reject),
+        )
         .route(
             "/api/coach/coaches/{id}",
             axum::routing::delete(registry_remove),
@@ -1236,6 +1290,7 @@ pub fn router(
             avatar,
             messages,
             match_api: crate::match_api::MatchApi::default(),
+            applications: crate::applications::Applications::default(),
         })
 }
 
@@ -1378,6 +1433,118 @@ mod tests {
                     .unwrap(),
             )
         }
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET display_mode='animal' WHERE telegram_id=2",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/apply",
+                2,
+                r#"{"message":" хочу учить "}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "GET", "/api/coach/apply", 2, "")
+                .await
+                .1["application"]["message"],
+            "хочу учить"
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "GET", "/api/coach/applications", 3, "")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (_, pending) =
+            coauthor_action(app.clone(), "GET", "/api/coach/applications", 1, "").await;
+        assert_eq!(pending["applications"][0]["telegram_id"], 2);
+        assert_eq!(pending["applications"][0]["anonymous"], true);
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/applications/2/reject",
+                1,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/applications/2/reject",
+                1,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/apply",
+                2,
+                r#"{"message":"again"}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/applications/2/approve",
+                1,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            coauthor_action(app.clone(), "GET", "/api/coach/apply", 2, "")
+                .await
+                .1["is_coach"],
+            true
+        );
+        assert_eq!(
+            coauthor_action(
+                app.clone(),
+                "POST",
+                "/api/coach/applications/2/approve",
+                1,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        profiles
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET username='Example' WHERE telegram_id=3",
+                [],
+            )
+            .unwrap();
         let endpoint = "/api/matches/1/coauthors";
         assert_eq!(
             coauthor_action(app.clone(), "POST", endpoint, 2, r#"{"telegram_id":3}"#)
@@ -2466,6 +2633,7 @@ mod tests {
             bot: None,
             messages: None,
             match_api: crate::match_api::MatchApi::default(),
+            applications: crate::applications::Applications::default(),
             avatar: Some((
                 cache,
                 crate::telegram::TelegramClient::new("test-token".into(), None).unwrap(),
