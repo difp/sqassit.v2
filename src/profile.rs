@@ -21,10 +21,12 @@ pub struct Profiles {
 #[derive(Debug)]
 pub enum ProfileError {
     Unauthorized(&'static str),
+    Forbidden(&'static str),
     Storage,
     Invalid(&'static str),
     Rule(u16, &'static str),
     RateLimited(u64),
+    Duplicate(i64),
 }
 
 #[derive(Default, Deserialize)]

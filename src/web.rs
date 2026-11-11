@@ -114,9 +114,11 @@ where
     let init = init_data(&headers);
     match tokio::task::spawn_blocking(move || operation(profiles, init, now())).await {
         Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(crate::profile::ProfileError::Forbidden(message))) => (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response(),
         Ok(Err(crate::profile::ProfileError::Unauthorized(message))) => {
             (StatusCode::UNAUTHORIZED, Json(json!({"detail":message}))).into_response()
         }
+        Ok(Err(crate::profile::ProfileError::Duplicate(id))) => (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"Такая тренировка уже есть в расписании.","duplicate_id":id}))).into_response(),
         Ok(Err(crate::profile::ProfileError::Rule(status, message))) => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"ok":false,"error":message})),
@@ -204,6 +206,52 @@ async fn api_cancel(
     })
     .await
 }
+async fn coach_list(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    profile_work(state, headers, |p, i, n| {
+        crate::coach::list_active(&p, &i, n)
+    })
+    .await
+}
+async fn coach_create(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::coach::NewTraining>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::create(&p, &i, n, body)
+    })
+    .await
+}
+async fn coach_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::lifecycle(&p, &i, n, id, crate::coach::Action::Delete)
+    })
+    .await
+}
+async fn coach_restore(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::lifecycle(&p, &i, n, id, crate::coach::Action::Restore)
+    })
+    .await
+}
+async fn coach_purge(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    profile_work(state, headers, move |p, i, n| {
+        crate::coach::lifecycle(&p, &i, n, id, crate::coach::Action::Purge)
+    })
+    .await
+}
 async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
@@ -240,6 +288,16 @@ pub fn router(
         .route("/tabs", get(tabs))
         .route("/api/me", get(api_me))
         .route("/api/trainings", get(api_trainings))
+        .route("/api/coach/trainings", get(coach_list).post(coach_create))
+        .route(
+            "/api/coach/trainings/{id}",
+            axum::routing::delete(coach_delete),
+        )
+        .route("/api/coach/trainings/{id}/restore", post(coach_restore))
+        .route(
+            "/api/coach/trainings/{id}/purge",
+            axum::routing::delete(coach_purge),
+        )
         .route("/api/trainings/{id}/book", post(api_book))
         .route("/api/trainings/{id}/cancel", post(api_cancel))
         .route("/api/me/onboarding", post(api_onboarding))
@@ -341,6 +399,13 @@ mod tests {
                 crate::rate_limit::RateLimiter::new(60, std::time::Duration::from_secs(60)),
             )),
         };
+        let mut coach_profiles = profiles.clone();
+        coach_profiles.owner = 42;
+        let coach_app = router(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
+            false,
+            Some(coach_profiles),
+        );
         let app = router(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("legacy/app/static"),
             false,
@@ -364,14 +429,14 @@ mod tests {
             method: &str,
             uri: &str,
             token: &str,
-            body: &'static str,
+            body: &str,
         ) -> (StatusCode, serde_json::Value) {
             let req = Request::builder()
                 .method(method)
                 .uri(uri)
                 .header("x-init-data", token)
                 .header("content-type", "application/json")
-                .body(Body::from(body))
+                .body(Body::from(body.to_owned()))
                 .unwrap();
             let r = app.oneshot(req).await.unwrap();
             let status = r.status();
@@ -472,6 +537,77 @@ mod tests {
                 .await
                 .0,
             StatusCode::NOT_FOUND
+        );
+        let date = (chrono::Utc::now() + chrono::Duration::days(2))
+            .with_timezone(&chrono_tz::Europe::Moscow)
+            .format("%Y-%m-%d")
+            .to_string();
+        let payload = json!({"date":date,"time":"12:00","training_type":"Тест"}).to_string();
+        assert_eq!(
+            send(
+                app.clone(),
+                "POST",
+                "/api/coach/trainings",
+                &signed,
+                &payload
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, created) = send(
+            coach_app.clone(),
+            "POST",
+            "/api/coach/trainings",
+            &signed,
+            &payload,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let created_id = created["id"].as_i64().unwrap();
+        assert_eq!(
+            send(
+                coach_app.clone(),
+                "POST",
+                "/api/coach/trainings",
+                &signed,
+                &payload
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let (_, listing) = send(
+            coach_app.clone(),
+            "GET",
+            "/api/coach/trainings",
+            &signed,
+            "",
+        )
+        .await;
+        assert!(listing["trainings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == created_id));
+        let endpoint = format!("/api/coach/trainings/{created_id}");
+        assert_eq!(
+            send(coach_app.clone(), "DELETE", &endpoint, &signed, "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                coach_app,
+                "POST",
+                &format!("{endpoint}/restore"),
+                &signed,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::OK
         );
         assert_eq!(
             send(app, "GET", "/api/me", &signed.replace("42", "43"), "")
