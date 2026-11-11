@@ -82,13 +82,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let allow_dev = matches!(dev.as_str(), "1" | "true" | "yes" | "on");
     eprintln!("SQASSIT Rust migration preview: incomplete; do not use in production. Listening on {address}");
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(
+    // Explicit opt-in while the rest of the bot and message cleanup are unfinished.
+    let enable_reminders = matches!(
+        env::var("SQASSIT_ENABLE_REMINDERS")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    let reminder_task = if enable_reminders {
+        let service = profiles
+            .clone()
+            .ok_or("BOT_TOKEN and COACH_TELEGRAM_ID are required for reminders")?;
+        let proxy = env::var("BOT_PROXY").unwrap_or_default();
+        let client =
+            sqassit::telegram::TelegramClient::new(service.bot_token.clone(), Some(&proxy))
+                .map_err(|_| "Invalid Telegram client or BOT_PROXY")?;
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if sqassit::reminders::run_tick(&service, &client, now)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Reminder tick failed; it will be retried");
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    let server_result = axum::serve(
         listener,
         sqassit::web::router(static_path, allow_dev, profiles),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
     })
-    .await?;
+    .await;
+    if let Some(task) = reminder_task {
+        task.abort();
+        let _ = task.await;
+    }
+    server_result?;
     Ok(())
 }

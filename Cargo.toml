@@ -20,6 +20,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 unicode-general-category = "1.1.0"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

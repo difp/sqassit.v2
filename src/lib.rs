@@ -8,6 +8,8 @@ pub mod coach_participants;
 pub mod identity;
 pub mod profile;
 pub mod rate_limit;
+pub mod reminders;
 pub mod storage;
+pub mod telegram;
 pub mod trainings;
 pub mod web;

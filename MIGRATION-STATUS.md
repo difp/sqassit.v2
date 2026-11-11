@@ -10,6 +10,7 @@ Reference: SQASSIT `736a779f59d9e13d7e3a0f0401d6dd1c642cfada`, imported under `l
 - Atomic training booking, approval, rejection, cancellation and FIFO promotion, including simultaneous requests for the last place.
 - Authenticated profile read/edit, onboarding acknowledgement, notification settings, the player-facing training schedule, booking and cancellation use SQLite and Telegram initData. The schedule preserves anonymous participant rendering and local-time conversion. Booking and cancellation do not yet deliver Telegram notifications.
 - Coach training creation, listing, editing, deletion, restoration and purge are available; notifications for training changes are not yet delivered. Participant listing, add, approve/reject, removal, restoration and reminder settings are available. Batch creation and coach history remain incomplete.
+- Telegram HTTPS transport and training reminder tick are available behind the opt-in `SQASSIT_ENABLE_REMINDERS` switch. The tick persists successful deliveries and retries failed ones. Telegram update handling, reminder-message deletion, event notifications and the rest of the bot are not yet implemented; this remains a preview.
 - Experimental Axum HTTP shell renders the legacy templates and serves static files. Readiness deliberately returns 503 while the API and bot are incomplete.
 
 ## Baseline and verification
