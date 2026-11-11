@@ -7,6 +7,7 @@ pub enum TelegramError {
     Configuration,
     Transport,
     Api,
+    NotModified,
 }
 
 #[derive(Clone)]
@@ -42,25 +43,26 @@ impl TelegramClient {
         if status.as_u16() == 429 || status.is_server_error() {
             return Err(TelegramError::Transport);
         }
-        if !status.is_success() {
-            return Err(TelegramError::Api);
-        }
         let value: Value = response
             .json()
             .await
             .map_err(|_| TelegramError::Transport)?;
-        if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(
-                if value
-                    .get("error_code")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|n| n == 429 || n >= 500)
-                {
-                    TelegramError::Transport
-                } else {
-                    TelegramError::Api
-                },
-            );
+        if !status.is_success() || value.get("ok").and_then(Value::as_bool) != Some(true) {
+            let code = value
+                .get("error_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::from(status.as_u16()));
+            if code == 429 || code >= 500 {
+                return Err(TelegramError::Transport);
+            }
+            if value
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.to_lowercase().contains("message is not modified"))
+            {
+                return Err(TelegramError::NotModified);
+            }
+            return Err(TelegramError::Api);
         }
         Ok(value)
     }
@@ -115,5 +117,19 @@ pub trait ReminderDeleter: Send + Sync {
 impl ReminderDeleter for TelegramClient {
     async fn delete(&self, chat_id: i64, message_id: i64) -> Result<(), TelegramError> {
         self.delete_message(chat_id, message_id).await
+    }
+}
+
+/// Narrow Bot API interface, injectable for tests without contacting Telegram.
+pub trait BotTransport: Send + Sync {
+    fn request(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> impl std::future::Future<Output = Result<Value, TelegramError>> + Send;
+}
+impl BotTransport for TelegramClient {
+    async fn request(&self, method: &str, payload: Value) -> Result<Value, TelegramError> {
+        self.call(method, payload).await
     }
 }

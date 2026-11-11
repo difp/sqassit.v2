@@ -54,7 +54,7 @@ pub struct PlayerProfile {
 fn default_mode() -> String {
     "name".into()
 }
-fn normalize_phone(phone: &str) -> Result<String, ProfileError> {
+pub(crate) fn normalize_phone(phone: &str) -> Result<String, ProfileError> {
     use unicode_general_category::{get_general_category, GeneralCategory};
     if phone.trim().is_empty() {
         return Ok(String::new());
