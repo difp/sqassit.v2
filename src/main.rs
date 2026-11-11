@@ -255,6 +255,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
     });
+    let rules_task = bot.as_ref().map(|runtime| {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if sqassit::bot::refresh_existing_rules(&runtime.profiles, &runtime.client, now)
+                .await
+                .is_err()
+            {
+                eprintln!("Could not load pinned rules for refresh");
+            }
+        })
+    });
     let poll_task = bot
         .as_ref()
         .filter(|v| v.mode == sqassit::updates::BotMode::Polling)
@@ -267,6 +282,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await;
+    if let Some(task) = rules_task {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(task) = poll_task {
         task.abort();
         let _ = task.await;

@@ -60,6 +60,7 @@ async fn rules<T: BotTransport>(
     bot: &T,
     user: i64,
     now: i64,
+    create_if_missing: bool,
 ) -> Result<(), BotError> {
     let existing = {
         let db = profiles.db.lock().map_err(|_| BotError::Database)?;
@@ -80,6 +81,9 @@ async fn rules<T: BotTransport>(
         }
     }
     if message == 0 {
+        if !create_if_missing {
+            return Ok(());
+        }
         message = send(bot, user, RULES, None)
             .await?
             .pointer("/result/message_id")
@@ -97,6 +101,30 @@ async fn rules<T: BotTransport>(
                 json!({"chat_id":user,"message_id":message,"disable_notification":true}),
             )
             .await;
+    }
+    Ok(())
+}
+
+/// Refresh existing pinned rules at startup without messaging users who never received them.
+pub async fn refresh_existing_rules<T: BotTransport>(
+    profiles: &Profiles,
+    bot: &T,
+    now: i64,
+) -> Result<(), BotError> {
+    let users = {
+        let db = profiles.db.lock().map_err(|_| BotError::Database)?;
+        let mut stmt = db.prepare("SELECT u.telegram_id FROM users u JOIN event_notifications n ON n.kind='rules' AND n.entity_id=0 AND n.chat_id=u.telegram_id AND n.user_id=0 WHERE n.message_id != 0 ORDER BY u.telegram_id").map_err(|_| BotError::Database)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(|_| BotError::Database)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| BotError::Database)?
+    };
+    for user in users {
+        if rules(profiles, bot, user, now, false).await.is_err() {
+            eprintln!("Could not refresh pinned rules");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     Ok(())
 }
@@ -199,7 +227,7 @@ pub async fn handle_update<T: BotTransport>(
                     .map_err(|_| BotError::Database)?;
                 }
             }
-            let _ = rules(profiles, bot, id, now).await;
+            let _ = rules(profiles, bot, id, now, true).await;
             let name = from
                 .get("first_name")
                 .and_then(Value::as_str)
@@ -391,7 +419,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         profiles.db.lock().unwrap().execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at) VALUES('rules',0,42,0,88,'old',0)",[]).unwrap();
-        rules(&profiles, &bot, 42, 1000).await.unwrap();
+        rules(&profiles, &bot, 42, 1000, true).await.unwrap();
         let calls = bot.calls.lock().unwrap();
         assert_eq!(*calls, vec!["editMessageText", "pinChatMessage"]);
         let db = profiles.db.lock().unwrap();
@@ -404,6 +432,60 @@ mod tests {
             .unwrap();
         assert_eq!(message, 88);
         assert_eq!(text, RULES);
+    }
+    #[tokio::test]
+    async fn startup_refresh_updates_only_existing_rules_without_creating_messages() {
+        let profiles = profiles();
+        let bot = Fake::default();
+        {
+            let db = profiles.db.lock().unwrap();
+            db.execute_batch("INSERT INTO users(telegram_id,first_name,created_at) VALUES(1,'A',0),(2,'B',0); INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at) VALUES('rules',0,1,0,88,'old',0);").unwrap();
+        }
+        refresh_existing_rules(&profiles, &bot, 1000).await.unwrap();
+        {
+            let calls = bot.calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(),
+                vec!["editMessageText", "pinChatMessage"]
+            );
+            assert!(calls.iter().all(|c| c.1["chat_id"] == 1));
+        }
+        let db = profiles.db.lock().unwrap();
+        let (count, text): (i64, String) = db
+            .query_row(
+                "SELECT COUNT(*), MAX(text) FROM event_notifications WHERE kind='rules'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(text, RULES);
+    }
+    #[tokio::test]
+    async fn startup_refresh_does_not_replace_rules_after_edit_failure() {
+        struct FailedEdit(Mutex<Vec<String>>);
+        impl BotTransport for FailedEdit {
+            async fn request(&self, method: &str, _: Value) -> Result<Value, TelegramError> {
+                self.0.lock().unwrap().push(method.to_owned());
+                Err(TelegramError::Transport)
+            }
+        }
+        let profiles = profiles();
+        profiles.db.lock().unwrap().execute_batch("INSERT INTO users(telegram_id,first_name,created_at) VALUES(1,'A',0); INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at) VALUES('rules',0,1,0,88,'old',0);").unwrap();
+        let bot = FailedEdit(Mutex::new(Vec::new()));
+        refresh_existing_rules(&profiles, &bot, 1000).await.unwrap();
+        assert_eq!(*bot.0.lock().unwrap(), vec!["editMessageText"]);
+        let text: String = profiles
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT text FROM event_notifications WHERE kind='rules'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "old");
     }
     #[tokio::test]
     async fn slot_callbacks_notify_booking_and_waitlist_promotion() {
