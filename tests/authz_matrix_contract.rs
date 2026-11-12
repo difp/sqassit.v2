@@ -147,6 +147,32 @@ async fn same_unauthenticated_route_matrix_as_python() {
     }
 }
 
+/// Normalize clock-derived and per-session values on both sides before
+/// comparing authenticated GET bodies.
+fn normalize(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(normalize),
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match key.as_str() {
+                    "joined_at" | "created_at" | "last_at" | "seconds_left" => {
+                        *item = json!("<clock>")
+                    }
+                    "ics_token" | "profile_token" => *item = json!("<scoped-token>"),
+                    "avatar_url" => {
+                        if let Some(url) = item.as_str() {
+                            let (path, _) = url.split_once('?').unwrap_or((url, ""));
+                            *item = json!(format!("{path}?<token>"));
+                        }
+                    }
+                    _ => normalize(item),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Authenticated roles are compared by status: bodies already have deep
 /// per-workflow comparisons in `python_contract`, and side effects here would
 /// make body snapshots order-sensitive for little extra coverage.
@@ -192,6 +218,17 @@ async fn same_authenticated_route_roles_as_python() {
                 status, expected_status,
                 "[{role}] {method} {path} status: Python {expected_status}, Rust {status}, body {body:?}"
             );
+            if method == "GET" {
+                let mut expected_body = route["json"].clone();
+                normalize(&mut expected_body);
+                if let Some(mut actual) = body {
+                    normalize(&mut actual);
+                    assert_eq!(
+                        actual, expected_body,
+                        "[{role}] GET {path} body differs from Python"
+                    );
+                }
+            }
         }
     }
 }
