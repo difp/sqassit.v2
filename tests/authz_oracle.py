@@ -1,9 +1,10 @@
-"""Offline Python reference for the unauthenticated route matrix.
+"""Offline Python reference for the route/role authorization matrix.
 
-Reads the reference routes from the Python application itself, requests each
-one without initData, and reports the status and JSON body. The Rust test uses
-the same request list, so a route missing from the Rust router shows up as a
-status difference.
+Reads the reference routes from the Python application itself and requests
+each one without initData (role "none") and as a player, a non-manager coach
+and the manager owner, each against a fresh database. The Rust test uses the
+same request list, so a route missing from the Rust router or one that
+authorizes a role differently shows up as a status difference.
 """
 import asyncio
 import json
@@ -23,6 +24,13 @@ from app import database as db
 from app import main
 
 ROUTE = re.compile(r'@app\.(get|post|put|patch|delete)\("([^"]+)"')
+
+ROLES = [
+    ("none", 0),
+    ("player", 42),
+    ("coach", 43),
+    ("manager", 123),
+]
 
 
 def sample(schema, components):
@@ -80,40 +88,79 @@ def routes():
     return result
 
 
-async def run():
+def init_data(role_id, now):
+    if not role_id:
+        return {}
+    import hashlib
+    import hmac
+    from urllib.parse import urlencode
+
+    user = json.dumps({"id": role_id, "first_name": "User"}, ensure_ascii=True, separators=(",", ":"))
+    fields = {"auth_date": str(now), "user": user}
+    check = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
+    secret = hmac.new(b"WebAppData", os.environ["BOT_TOKEN"].encode(), hashlib.sha256).digest()
+    fields["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    return {"X-Init-Data": urlencode(fields)}
+
+
+async def run_pass(role, role_id, now, routes_list, schema):
     with tempfile.TemporaryDirectory(prefix="sqassit-authz-") as directory:
         await db.connect(os.path.join(directory, "reference.sqlite"))
         try:
-            async with httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=main.app),
-                base_url="http://reference",
-            ) as client:
-                schema = main.app.openapi()
-                responses = []
-                for route in routes():
-                    body = body_for(route, schema)
-                    response = await client.request(
-                        route["method"],
-                        route["path"],
-                        json=body if body is not None else None,
-                        content=None if body is not None else b"",
-                    )
-                    payload = None
-                    if response.headers.get("content-type", "").startswith("application/json"):
-                        try:
-                            payload = response.json()
-                        except ValueError:
-                            payload = None
-                    responses.append({
-                        "method": route["method"],
-                        "path": route["path"],
-                        "status": response.status_code,
-                        "request_json": body,
-                        "json": payload,
-                    })
-                print(json.dumps({"responses": responses}, ensure_ascii=False))
+            # Same seed as the Rust test: coach rows precede their users.
+            await db._execute(
+                "INSERT INTO coaches (telegram_id, created_at) VALUES (43, 0), (123, 0)"
+            )
+            await db._execute(
+                "INSERT INTO users (telegram_id, first_name, is_coach, created_at) "
+                "VALUES (42, 'Player', 0, 0), (43, 'Second', 1, 0), (123, 'Тренер', 1, 0)"
+            )
+            headers = init_data(role_id, now)
+            responses = []
+            for route in routes_list:
+                body = body_for(route, schema)
+                response = await client_request(headers, route, body)
+                payload = None
+                if response.headers.get("content-type", "").startswith("application/json"):
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                responses.append({
+                    "role": role,
+                    "method": route["method"],
+                    "path": route["path"],
+                    "status": response.status_code,
+                    "request_json": body,
+                    "json": payload,
+                })
+            return responses
         finally:
             await db.close()
+
+
+async def client_request(headers, route, body):
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=main.app),
+        base_url="http://reference",
+    ) as client:
+        return await client.request(
+            route["method"],
+            route["path"],
+            headers=headers,
+            json=body if body is not None else None,
+            content=None if body is not None else b"",
+        )
+
+
+async def run():
+    now = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    schema = main.app.openapi()
+    routes_list = routes()
+    responses = []
+    for role, role_id in ROLES:
+        responses.extend(await run_pass(role, role_id, now, routes_list, schema))
+    print(json.dumps({"responses": responses}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
