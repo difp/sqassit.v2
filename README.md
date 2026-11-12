@@ -80,7 +80,7 @@ the old-schema migration, security headers, bot commands/callbacks, reminder
 tick, notification cleanup, enrollment replacement, training/match/chat
 notifications, role notices, Unicode search normalization across every scalar
 value, and all 75 routes requested unauthenticated and as player / coach /
-manager (unauthenticated bodies and all GET payloads are compared).
+manager — statuses and bodies for all 300 route/role pairs, except pydantic's error arrays for malformed bodies.
 Timestamps, scoped tokens and bot defaults are normalized — this is
 strong, but not complete, parity verification.
 

@@ -218,14 +218,18 @@ async fn same_authenticated_route_roles_as_python() {
                 status, expected_status,
                 "[{role}] {method} {path} status: Python {expected_status}, Rust {status}, body {body:?}"
             );
-            if method == "GET" {
+            // FastAPI serializes malformed request bodies as pydantic error
+            // arrays; Rust validates with serde and keeps its own wording, so
+            // only domain-level error and success bodies are compared.
+            let pydantic = route["json"]["detail"].is_array();
+            if !pydantic {
                 let mut expected_body = route["json"].clone();
                 normalize(&mut expected_body);
                 if let Some(mut actual) = body {
                     normalize(&mut actual);
                     assert_eq!(
                         actual, expected_body,
-                        "[{role}] GET {path} body differs from Python"
+                        "[{role}] {method} {path} body differs from Python"
                     );
                 }
             }
