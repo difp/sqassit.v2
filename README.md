@@ -1,21 +1,106 @@
 # SQASSIT v2 — Rust migration
 
-This repository tracks the migration of [SQASSIT](https://github.com/difp/sqassit) to Rust. The reference implementation in `legacy/` is a snapshot of commit `736a779f59d9e13d7e3a0f0401d6dd1c642cfada`. Its tests, static assets, and deployment documentation remain available for compatibility checks.
+Rust migration of [SQASSIT](https://github.com/difp/sqassit), a Telegram Mini App
+for a squash club. `legacy/` holds the Python reference (snapshot of
+`736a779f59d9e13d7e3a0f0401d6dd1c642cfada`) used for compatibility checks.
 
-**Status:** migration in progress. The Python implementation remains the reference and is not yet replaced. See [the migration plan](RUST-MIGRATION-PLAN.md).
+> **Status: preview.** All 75 reference HTTP routes, the bot commands/callbacks
+> and the reminder tick are ported and cross-checked against Python, but real
+> Telegram delivery and production deployment are **not** verified. Do not
+> deploy this crate in place of the Python application.
+>
+> Progress and remaining gates: [MIGRATION-STATUS.md](MIGRATION-STATUS.md) ·
+> migration plan: [RUST-MIGRATION-PLAN.md](RUST-MIGRATION-PLAN.md)
 
-## Rust preview
+## Run
 
-With Rust installed, run `cargo run` from the repository root and open `http://127.0.0.1:8000`. The preview serves the original pages and implements much of the API, but parity and real Telegram delivery are not yet verified. Set `BOT_TOKEN`, `COACH_TELEGRAM_ID`, and optionally `DB_PATH` to enable authenticated endpoints. With the opt-in bot, booking and cancellation trigger best-effort Telegram notifications. `/readyz` checks SQLite and Telegram Bot API (`getMe`, cached for 60 seconds) and returns 503 with a Russian detail when either is unavailable; without `BOT_TOKEN` it reports the database as unavailable. This build must not be deployed as a replacement. `SQASSIT_BIND` and `SQASSIT_STATIC_DIR` override the bind address and static directory for development; `AVATAR_CACHE_DIR` selects the avatar disk cache (default `./data/cache/avatars`). Set `ALLOW_DEV_INIT_DATA=true` only for local browser checks and open a page with a valid signed `?initData=` query; the server still verifies its HMAC signature.
+```sh
+cargo run                 # then open http://127.0.0.1:8000
+```
 
-Run `cargo test --locked` for the current Rust checks. Progress and remaining work are documented in [MIGRATION-STATUS.md](MIGRATION-STATUS.md); [DEPLOY-RUST.md](DEPLOY-RUST.md) sketches a systemd/nginx/Render setup, backups and rollback without claiming a target-platform rehearsal.
+Set `BOT_TOKEN` and `COACH_TELEGRAM_ID` to enable authenticated endpoints.
+`/readyz` probes SQLite and the Telegram Bot API and returns 503 with a Russian
+detail when either is unavailable.
 
-For a local release smoke test, run `cargo build --release --locked` followed by `python3 tests/release_smoke.py target/release/sqassit`. The test stages the binary and static files in a temporary directory, starts it without credentials, checks its HTTP responses and stops it. Run `python3 tests/backup_restore_smoke.py target/release/sqassit` to write a signed-in profile marker, copy the live SQLite database with SQLite's online backup API, boot a second server from the copy and read the marker back. CI runs both. These are packaging and backup rehearsals, not production deployment validation.
+### Environment
 
-For a synthetic large-directory timing, run `cargo test --release --locked --test search_benchmark -- --ignored --nocapture`. It seeds 50,000 players in memory and prints timings. Run `cargo test --release --locked --test http_benchmark -- --ignored --nocapture` for HTTP timings with 6,000 users, 2,000 trainings and 12,000 bookings in memory; it prints `/api/me` and schedule latencies. Neither is a production load test.
+| Variable | Purpose |
+| --- | --- |
+| `BOT_TOKEN`, `COACH_TELEGRAM_ID` | Bot identity and owner (manager) |
+| `DB_PATH` | SQLite file (default `./data/squash.db`) |
+| `SQASSIT_BIND`, `SQASSIT_STATIC_DIR` | Bind address and static dir (development) |
+| `AVATAR_CACHE_DIR` | Avatar disk cache (default `./data/cache/avatars`) |
+| `SQASSIT_ENABLE_BOT=true` | Opt-in update handling (dedicated test bot only) |
+| `BOT_MODE` | `polling` (default) or `webhook` |
+| `WEBHOOK_BASE_URL`, `WEBHOOK_SECRET` | Required for `webhook`; secret ≥ 32 chars |
+| `SQASSIT_REGISTER_WEBHOOK=true` | Let this preview claim the bot's webhook |
+| `SQASSIT_ENABLE_REMINDERS=true` | Opt-in training reminder tick |
+| `BOT_PROXY` | HTTP or SOCKS proxy for Telegram API |
+| `ALLOW_DEV_INIT_DATA=true` | Dev-only `?initData=` sign-in (HMAC still verified) |
 
-The Python/Rust contract tests use separate temporary databases and suppress Telegram background tasks. Install `legacy/requirements.txt` and `httpx2==2.14.0` in a Python 3.12 environment, then run `SQASSIT_REFERENCE_PYTHON=/path/to/python cargo test --locked --test python_contract --test schema_contract --test bot_contract --test reminder_contract --test cleanup_contract --test final_enrollment_contract --test match_notify_contract --test chat_notify_contract --test headers_contract --test training_delete_contract --test application_notify_contract --test role_notify_contract --test training_edit_contract --test training_booking_contract --test training_coach_contract --test match_create_contract --test match_feed_contract --test search_norm_contract --test authz_matrix_contract -- --ignored`. They compare HTTP workflows and selected final data, the migration of a synthetic old SQLite schema, security and cache headers, outgoing Telegram API calls for the ported bot commands and callbacks, one training-reminder tick, expired-notification cleanup including a transient deletion failure, preliminary-to-final enrollment replacement, match notifications, chat notifications, training-deletion notifications, coach-application notifications, role notices, training edits/restoration, booking/cancellation and coach participant-action notifications, match creation/feed publication, match-feed refresh/removal, Unicode search normalization across every scalar value, and every reference route requested without authentication and as a player, non-manager coach and manager. Timestamps and scoped-token values are normalized, and fake message IDs follow the same sequence, so this is not complete parity verification. CI runs them separately. The Python SQLite worker may require running outside restrictive sandboxes. With the same reference interpreter, `SQASSIT_REFERENCE_PYTHON=/path/to/python python3 tests/rollback_smoke.py target/release/sqassit` rehearses a rollback: Rust writes a profile marker, Python opens the same migrated database, reads and overwrites it and adds a training, and Rust reads both changes back.
+Bot notes: polling refuses to start while a webhook is active and never drops
+updates; unrelated updates are ignored, failed supported ones may be retried.
+Never run alongside another poller or with a production bot.
 
-Experimental training reminders can be enabled explicitly with `SQASSIT_ENABLE_REMINDERS=true`, a test bot token and a test database. This sends real Telegram messages. Run at most one scheduler per database. This preview is not suitable for production. `BOT_PROXY` can configure HTTP or SOCKS proxy access.
+## Checks
 
-For a dedicated **test bot only**, `SQASSIT_ENABLE_BOT=true` enables update handling. `BOT_MODE=polling` checks Telegram for an existing webhook and refuses to start if one is active or its status cannot be checked; it never deletes the webhook or drops updates. `BOT_MODE=webhook` requires `WEBHOOK_BASE_URL` and a secret of at least 32 characters in `WEBHOOK_SECRET`. Set `SQASSIT_REGISTER_WEBHOOK=true` only when you intentionally want this preview to replace the bot’s registered Telegram webhook. Unrelated updates are ignored; failed supported updates may be retried. Do not run this alongside another poller or use a production bot: live delivery and the remaining migration gaps are listed in MIGRATION-STATUS.md.
+```sh
+cargo test --locked                       # unit tests (no Python needed)
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
+```
+
+Release smoke — stages the binary + static files, boots without credentials,
+checks HTTP, stops (also rehearses the SQLite online backup and restart):
+
+```sh
+cargo build --release --locked
+python3 tests/release_smoke.py target/release/sqassit
+python3 tests/backup_restore_smoke.py target/release/sqassit
+```
+
+Rollback rehearsal — the Python reference opens the Rust-migrated database,
+reads and overwrites it, and Rust reads the changes back (needs the reference
+Python; see below):
+
+```sh
+SQASSIT_REFERENCE_PYTHON=/path/to/python python3 tests/rollback_smoke.py target/release/sqassit
+```
+
+Synthetic benchmarks (in-memory, not a production load test):
+
+```sh
+cargo test --release --locked --test search_benchmark -- --ignored --nocapture   # 50k players
+cargo test --release --locked --test http_benchmark -- --ignored --nocapture     # 2k trainings / 12k bookings
+```
+
+### Python/Rust contract tests (opt-in)
+
+Compare the Rust implementation with `legacy/`: HTTP workflows and final data,
+the old-schema migration, security headers, bot commands/callbacks, reminder
+tick, notification cleanup, enrollment replacement, training/match/chat
+notifications, role notices, Unicode search normalization across every scalar
+value, and all 75 routes requested unauthenticated and as player / coach /
+manager. Timestamps, scoped tokens and bot defaults are normalized — this is
+strong, but not complete, parity verification.
+
+Needs a Python 3.12 environment with `legacy/requirements.txt` and
+`httpx2==2.14.0` (may require running outside restrictive sandboxes):
+
+```sh
+tests=(python_contract schema_contract bot_contract reminder_contract cleanup_contract \
+final_enrollment_contract match_notify_contract match_create_contract match_feed_contract \
+chat_notify_contract headers_contract training_delete_contract application_notify_contract \
+role_notify_contract training_edit_contract training_booking_contract training_coach_contract \
+search_norm_contract authz_matrix_contract)
+SQASSIT_REFERENCE_PYTHON=/path/to/python cargo test --locked "${tests[@]/#/--test=}" -- --ignored
+```
+
+CI ([`.github/workflows/rust.yml`](.github/workflows/rust.yml)) runs the fast
+checks plus both smokes, and the contract suite against the reference
+interpreter.
+
+## Deployment
+
+[DEPLOY-RUST.md](DEPLOY-RUST.md) sketches staging, systemd/nginx/Render setup,
+SQLite backups and Python rollback. It has not been rehearsed on a target
+platform yet.
