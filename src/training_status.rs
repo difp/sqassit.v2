@@ -245,24 +245,47 @@ pub async fn ensure<T: BotTransport>(
 }
 
 /// Process due status messages. Transient failures preserve rows for retry.
+/// One scheduler pass, mirroring the Python notifications loop: expired
+/// messages of every kind are deleted in `delete_at` order, then preliminary
+/// confirmations become final, and stale ones are discarded afterwards.
 pub async fn tick<T: BotTransport>(
     p: &Profiles,
     bot: &T,
     notifier: &EventNotifier,
     now: i64,
 ) -> Result<(), NotifyError> {
-    let ids = {
-        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-        let mut stmt=db.prepare("SELECT id FROM event_notifications WHERE kind IN ('training_booked','training_waitlist','training_rejected') AND ((delete_at IS NOT NULL AND delete_at<=?1) OR (kind='training_booked' AND phase='preliminary' AND final_at IS NOT NULL AND final_at<=?1)) ORDER BY id").map_err(|_|NotifyError::Database)?;
-        let rows = stmt
-            .query_map([now], |r| r.get::<_, i64>(0))
-            .map_err(|_| NotifyError::Database)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| NotifyError::Database)?
-    };
     let mut failed = false;
-    for id in ids {
+    let due = due_ids(
+        p,
+        "SELECT id FROM event_notifications WHERE delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at,id",
+        now,
+    )?;
+    for id in due {
+        if sweep_deletion(p, bot, notifier, id, now).await.is_err() {
+            failed = true;
+        }
+    }
+    // Preliminary confirmations whose training is live become final; the
+    // Python finals handler only selects rows joined to an upcoming training.
+    let finals = due_ids(
+        p,
+        "SELECT n.id FROM event_notifications n JOIN trainings t ON t.id=n.entity_id WHERE n.kind='training_booked' AND n.phase='preliminary' AND n.final_at IS NOT NULL AND n.final_at<=?1 AND t.deleted_at IS NULL AND t.start_at>?1 ORDER BY n.final_at,n.id",
+        now,
+    )?;
+    for id in finals {
         if process_due(p, bot, notifier, id, now).await.is_err() {
+            failed = true;
+        }
+    }
+    // Rows whose training is gone, deleted or already started are removed
+    // after the finals pass, like the Python stale-preliminary cleanup.
+    let stale = due_ids(
+        p,
+        "SELECT n.id FROM event_notifications n LEFT JOIN trainings t ON t.id=n.entity_id WHERE n.kind='training_booked' AND n.phase='preliminary' AND n.final_at IS NOT NULL AND n.final_at<=?1 AND (t.id IS NULL OR t.deleted_at IS NOT NULL OR t.start_at<=?1) ORDER BY n.id",
+        now,
+    )?;
+    for id in stale {
+        if discard_stale(p, bot, notifier, id).await.is_err() {
             failed = true;
         }
     }
@@ -271,6 +294,99 @@ pub async fn tick<T: BotTransport>(
     } else {
         Ok(())
     }
+}
+
+fn due_ids(p: &Profiles, sql: &str, now: i64) -> Result<Vec<i64>, NotifyError> {
+    let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+    let mut stmt = db.prepare(sql).map_err(|_| NotifyError::Database)?;
+    let rows = stmt
+        .query_map([now], |r| r.get::<_, i64>(0))
+        .map_err(|_| NotifyError::Database)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| NotifyError::Database)
+}
+
+/// Delete one expired notification row, replicating the Python deletion
+/// sweep: preliminary confirmations with a pending final keep their record,
+/// transient Telegram failures postpone the deletion to the next tick.
+async fn sweep_deletion<T: BotTransport>(
+    p: &Profiles,
+    bot: &T,
+    notifier: &EventNotifier,
+    id: i64,
+    now: i64,
+) -> Result<(), NotifyError> {
+    let _guard = notifier.lock.lock().await;
+    let row = notification_row(p, id)?;
+    let Some((row, chat)) = row else {
+        return Ok(());
+    };
+    if row.kind == "training_booked" && row.phase == "preliminary" && row.final_at.unwrap_or(0) != 0
+    {
+        let final_at = row.final_at.unwrap_or(0);
+        if final_at <= now {
+            // The final message is sent by the dedicated pass below.
+            return Ok(());
+        }
+        if row.message != 0
+            && matches!(
+                bot.request(
+                    "deleteMessage",
+                    json!({"chat_id":chat,"message_id":row.message})
+                )
+                .await,
+                Err(TelegramError::Transport | TelegramError::Configuration)
+            )
+        {
+            return Err(NotifyError::Telegram);
+        }
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        db.execute(
+            "UPDATE event_notifications SET message_id=0,delete_at=NULL WHERE id=?1",
+            [id],
+        )
+        .map_err(|_| NotifyError::Database)?;
+        return Ok(());
+    }
+    remove(p, bot, chat, &row).await
+}
+
+/// Discard a stale preliminary confirmation: its training is missing, deleted
+/// or already over, so only the message and the row are removed.
+async fn discard_stale<T: BotTransport>(
+    p: &Profiles,
+    bot: &T,
+    notifier: &EventNotifier,
+    id: i64,
+) -> Result<(), NotifyError> {
+    let _guard = notifier.lock.lock().await;
+    let row = notification_row(p, id)?;
+    let Some((row, chat)) = row else {
+        return Ok(());
+    };
+    remove(p, bot, chat, &row).await
+}
+
+fn notification_row(p: &Profiles, id: i64) -> Result<Option<(Record, i64)>, NotifyError> {
+    let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+    db.query_row(
+        "SELECT id,kind,message_id,phase,final_at,chat_id FROM event_notifications WHERE id=?1",
+        [id],
+        |r| {
+            Ok((
+                Record {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    message: r.get(2)?,
+                    phase: r.get(3)?,
+                    final_at: r.get(4)?,
+                },
+                r.get::<_, i64>(5)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|_| NotifyError::Database)
 }
 
 /// Update existing status messages after the roster or training details change.
@@ -388,77 +504,58 @@ async fn process_due<T: BotTransport>(
     let _guard = notifier.lock.lock().await;
     let row = {
         let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-        db.query_row("SELECT id,kind,message_id,phase,final_at,entity_id,chat_id,delete_at FROM event_notifications WHERE id=?1",[id],|r|Ok((Record{id:r.get(0)?,kind:r.get(1)?,message:r.get(2)?,phase:r.get(3)?,final_at:r.get(4)?},r.get::<_,i64>(5)?,r.get::<_,i64>(6)?,r.get::<_,Option<i64>>(7)?))).optional().map_err(|_|NotifyError::Database)?
+        db.query_row("SELECT id,kind,message_id,phase,final_at,entity_id,chat_id FROM event_notifications WHERE id=?1",[id],|r|Ok((Record{id:r.get(0)?,kind:r.get(1)?,message:r.get(2)?,phase:r.get(3)?,final_at:r.get(4)?},r.get::<_,i64>(5)?,r.get::<_,i64>(6)?))).optional().map_err(|_|NotifyError::Database)?
     };
-    let Some((row, training, user, delete_at)) = row else {
+    let Some((row, training, user)) = row else {
         return Ok(());
     };
-    if row.kind == "training_booked" && row.phase == "preliminary" {
-        if row.final_at.is_some_and(|v| v <= now) {
-            let current = state(p, training, user)?;
-            let snapshot = training_notify::snapshot(p, training)?;
-            if !matches!(current,Some((ref status,true)) if status=="booked")
-                || snapshot.as_ref().is_none_or(|s| s.start <= now)
-            {
-                return remove(p, bot, user, &row).await;
-            }
-            let s = snapshot.ok_or(NotifyError::Database)?;
-            let deadline = s
-                .start
-                .saturating_add(s.duration.saturating_mul(60))
-                .saturating_add(14400);
-            let text = booked_text(&s, false);
-            let new_id = send_new(
-                p,
-                bot,
-                StatusMessage {
-                    training,
-                    user,
-                    kind: "training_booked",
-                    text: &text,
-                    phase: "final",
-                    deadline,
-                    final_at: None,
-                    now,
-                },
-            )
-            .await?;
-            if row.message != 0
-                && row.message != new_id
-                && matches!(
-                    bot.request(
-                        "deleteMessage",
-                        json!({"chat_id":user,"message_id":row.message})
-                    )
-                    .await,
-                    Err(TelegramError::Transport | TelegramError::Configuration)
-                )
-            {
-                let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-                db.execute("INSERT OR IGNORE INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at,sent_at) VALUES('notice',?1,?2,?2,?1,'',?3,?3,?3)",params![row.message,user,now]).map_err(|_|NotifyError::Database)?;
-            }
-            return Ok(());
-        }
-        if delete_at.is_some_and(|v| v <= now) {
-            if row.message != 0
-                && matches!(
-                    bot.request(
-                        "deleteMessage",
-                        json!({"chat_id":user,"message_id":row.message})
-                    )
-                    .await,
-                    Err(TelegramError::Transport | TelegramError::Configuration)
-                )
-            {
-                return Err(NotifyError::Telegram);
-            }
-            let db = p.db.lock().map_err(|_| NotifyError::Database)?;
-            db.execute("UPDATE event_notifications SET message_id=0,delete_at=NULL WHERE id=?1 AND message_id=?2 AND phase='preliminary'",params![id,row.message]).map_err(|_|NotifyError::Database)?;
-        }
+    if row.kind != "training_booked"
+        || row.phase != "preliminary"
+        || !row.final_at.is_some_and(|v| v <= now)
+    {
         return Ok(());
     }
-    if delete_at.is_some_and(|v| v <= now) {
-        remove(p, bot, user, &row).await?;
+    let current = state(p, training, user)?;
+    let snapshot = training_notify::snapshot(p, training)?;
+    if !matches!(current,Some((ref status,true)) if status=="booked")
+        || snapshot.as_ref().is_none_or(|s| s.start <= now)
+    {
+        return remove(p, bot, user, &row).await;
+    }
+    let s = snapshot.ok_or(NotifyError::Database)?;
+    let deadline = s
+        .start
+        .saturating_add(s.duration.saturating_mul(60))
+        .saturating_add(14400);
+    let text = booked_text(&s, false);
+    let new_id = send_new(
+        p,
+        bot,
+        StatusMessage {
+            training,
+            user,
+            kind: "training_booked",
+            text: &text,
+            phase: "final",
+            deadline,
+            final_at: None,
+            now,
+        },
+    )
+    .await?;
+    if row.message != 0
+        && row.message != new_id
+        && matches!(
+            bot.request(
+                "deleteMessage",
+                json!({"chat_id":user,"message_id":row.message})
+            )
+            .await,
+            Err(TelegramError::Transport | TelegramError::Configuration)
+        )
+    {
+        let db = p.db.lock().map_err(|_| NotifyError::Database)?;
+        db.execute("INSERT OR IGNORE INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at,sent_at) VALUES('notice',?1,?2,?2,?1,'',?3,?3,?3)",params![row.message,user,now]).map_err(|_|NotifyError::Database)?;
     }
     Ok(())
 }

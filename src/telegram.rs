@@ -109,19 +109,6 @@ impl ReminderSender for TelegramClient {
     }
 }
 
-pub trait ReminderDeleter: Send + Sync {
-    fn delete(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> impl std::future::Future<Output = Result<(), TelegramError>> + Send;
-}
-impl ReminderDeleter for TelegramClient {
-    async fn delete(&self, chat_id: i64, message_id: i64) -> Result<(), TelegramError> {
-        self.delete_message(chat_id, message_id).await
-    }
-}
-
 /// Narrow Bot API interface, injectable for tests without contacting Telegram.
 pub trait BotTransport: Send + Sync {
     fn request(

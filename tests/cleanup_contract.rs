@@ -1,8 +1,9 @@
-//! Opt-in comparison of expired-notification cleanup against the Python bot.
+//! Opt-in comparison of the unified notification cleanup tick against the
+//! Python notifications loop.
 use serde_json::{json, Value};
 use sqassit::{
     profile::Profiles,
-    telegram::{BotTransport, ReminderDeleter, TelegramError},
+    telegram::{BotTransport, TelegramError},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -23,6 +24,8 @@ struct Seed {
 }
 
 fn seeds() -> Vec<Seed> {
+    // Delete offsets are distinct and deliberately out of row order, so both
+    // sides must sort by delete_at to produce the same call sequence.
     vec![
         Seed {
             kind: "training",
@@ -31,7 +34,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 101,
             text: "card",
-            delete: Some(-10),
+            delete: Some(-5),
             phase: "",
             final_at: None,
         },
@@ -53,7 +56,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 103,
             text: "match",
-            delete: Some(-8),
+            delete: Some(-1),
             phase: "",
             final_at: None,
         },
@@ -75,7 +78,7 @@ fn seeds() -> Vec<Seed> {
             user: 123,
             message: 105,
             text: "application",
-            delete: Some(-6),
+            delete: Some(-3),
             phase: "",
             final_at: None,
         },
@@ -86,7 +89,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 106,
             text: "notice",
-            delete: Some(-5),
+            delete: Some(-8),
             phase: "",
             final_at: None,
         },
@@ -97,7 +100,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 107,
             text: "reminder",
-            delete: Some(-4),
+            delete: Some(-2),
             phase: "",
             final_at: None,
         },
@@ -108,7 +111,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 108,
             text: "final booked",
-            delete: Some(-3),
+            delete: Some(-10),
             phase: "final",
             final_at: None,
         },
@@ -119,7 +122,7 @@ fn seeds() -> Vec<Seed> {
             user: 88,
             message: 0,
             text: "waitlist without message",
-            delete: Some(-2),
+            delete: Some(-6),
             phase: "status",
             final_at: None,
         },
@@ -130,7 +133,7 @@ fn seeds() -> Vec<Seed> {
             user: 99,
             message: 110,
             text: "rejected",
-            delete: Some(-1),
+            delete: Some(-4),
             phase: "status",
             final_at: None,
         },
@@ -143,7 +146,7 @@ fn seeds() -> Vec<Seed> {
             user: 77,
             message: 111,
             text: "preliminary",
-            delete: Some(-1),
+            delete: Some(-11),
             phase: "preliminary",
             final_at: Some(3600),
         },
@@ -177,7 +180,7 @@ fn seeds() -> Vec<Seed> {
             user: 88,
             message: 114,
             text: "transient",
-            delete: Some(-1),
+            delete: Some(-12),
             phase: "",
             final_at: None,
         },
@@ -206,26 +209,14 @@ impl Fake {
             json!({"ok": true, "result": true})
         })
     }
-    fn take_calls(&self) -> Vec<Value> {
-        let mut calls = std::mem::take(&mut *self.calls.lock().unwrap());
-        calls.sort_by_key(|call| serde_json::to_string(call).unwrap());
-        calls
+    fn calls(&self) -> Vec<Value> {
+        self.calls.lock().unwrap().clone()
     }
 }
 
 impl BotTransport for Fake {
     async fn request(&self, method: &str, payload: Value) -> Result<Value, TelegramError> {
         self.record(method, payload)
-    }
-}
-
-impl ReminderDeleter for Fake {
-    async fn delete(&self, chat_id: i64, message_id: i64) -> Result<(), TelegramError> {
-        self.record(
-            "deleteMessage",
-            json!({"chat_id": chat_id, "message_id": message_id}),
-        )
-        .map(|_| ())
     }
 }
 
@@ -317,12 +308,12 @@ async fn same_cleanup_tick_as_python() {
     let notifier = sqassit::event_notify::EventNotifier::default();
     *fake.fail_for.lock().unwrap() = Some(114);
 
-    // The two cleanup loops run concurrently in the server, so deletion order
-    // is not compared; only the set of calls and the resulting rows are.
+    // The tick now performs the whole Python notifications loop in one pass:
+    // every kind is deleted in delete_at order, then due finals and stale
+    // preliminary rows are processed, so the call order is compared exactly.
     let _ = sqassit::training_status::tick(&profiles, &fake, &notifier, now).await;
-    let _ = sqassit::reminders::cleanup_expired(&profiles, &fake, now).await;
     assert_eq!(
-        json!(fake.take_calls()),
+        json!(fake.calls()),
         expected["first_calls"],
         "first tick calls"
     );
@@ -330,12 +321,12 @@ async fn same_cleanup_tick_as_python() {
         let db = profiles.db.lock().unwrap();
         assert_eq!(json!(rows(&db)), expected["first_rows"], "first tick rows");
     }
+    fake.calls.lock().unwrap().clear();
 
     *fake.fail_for.lock().unwrap() = None;
     let _ = sqassit::training_status::tick(&profiles, &fake, &notifier, now).await;
-    let _ = sqassit::reminders::cleanup_expired(&profiles, &fake, now).await;
     assert_eq!(
-        json!(fake.take_calls()),
+        json!(fake.calls()),
         expected["second_calls"],
         "second tick calls"
     );

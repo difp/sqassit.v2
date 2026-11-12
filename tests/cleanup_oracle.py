@@ -39,23 +39,25 @@ class FakeBot:
 
 ROWS = [
     # kind, entity, chat, user, message, text, delete_at offset, phase, final_at offset
-    ("training", 1, 77, 77, 101, "card", -10, "", None),
+    # Offsets are distinct and deliberately out of row order, so both sides
+    # must sort by delete_at to produce the same call sequence.
+    ("training", 1, 77, 77, 101, "card", -5, "", None),
     ("chat", 5, 77, 77, 102, "chat", -9, "", None),
-    ("match", 2, 77, 77, 103, "match", -8, "", None),
+    ("match", 2, 77, 77, 103, "match", -1, "", None),
     ("match_feed", 1, 77, 77, 104, "feed", -7, "", None),
-    ("coach_application", 44, 123, 123, 105, "application", -6, "", None),
-    ("notice", 0, 77, 77, 106, "notice", -5, "", None),
-    ("training_reminder", 1, 77, 77, 107, "reminder", -4, "", None),
-    ("training_booked", 1, 77, 77, 108, "final booked", -3, "final", None),
-    ("training_waitlist", 1, 88, 88, 0, "waitlist without message", -2, "status", None),
-    ("training_rejected", 1, 99, 99, 110, "rejected", -1, "status", None),
+    ("coach_application", 44, 123, 123, 105, "application", -3, "", None),
+    ("notice", 0, 77, 77, 106, "notice", -8, "", None),
+    ("training_reminder", 1, 77, 77, 107, "reminder", -2, "", None),
+    ("training_booked", 1, 77, 77, 108, "final booked", -10, "final", None),
+    ("training_waitlist", 1, 88, 88, 0, "waitlist without message", -6, "status", None),
+    ("training_rejected", 1, 99, 99, 110, "rejected", -4, "status", None),
     # Preliminary confirmation whose final message is not due yet: the message
     # is deleted, but the row is kept so the final confirmation can arrive.
-    ("training_booked", 2, 77, 77, 111, "preliminary", -1, "preliminary", 3600),
+    ("training_booked", 2, 77, 77, 111, "preliminary", -11, "preliminary", 3600),
     ("training", 3, 77, 77, 112, "future card", 1000, "", None),
     ("chat", 6, 77, 77, 113, "no deadline", None, "", None),
     # Deletion fails transiently on the first tick and succeeds on the second.
-    ("notice", 9, 88, 88, 114, "transient", -1, "", None),
+    ("notice", 9, 88, 88, 114, "transient", -12, "", None),
 ]
 
 
@@ -65,10 +67,6 @@ async def snapshot():
         "FROM event_notifications ORDER BY id"
     )
     return [dict(row) for row in rows]
-
-
-def sorted_calls(calls):
-    return sorted(calls, key=lambda call: json.dumps(call, sort_keys=True))
 
 
 async def run():
@@ -91,13 +89,19 @@ async def run():
                     ),
                 )
             fake.fail_for = 114
+            # The full notifications loop order: deletions, final enrollments,
+            # then stale preliminary cleanup.
             await main._process_due_deletions(now)
-            first_calls = sorted_calls(fake.calls)
+            await main._process_due_final_enrollments(now)
+            await main._cleanup_stale_preliminary(now)
+            first_calls = list(fake.calls)
             first_rows = await snapshot()
             fake.calls.clear()
             fake.fail_for = None
             await main._process_due_deletions(now)
-            second_calls = sorted_calls(fake.calls)
+            await main._process_due_final_enrollments(now)
+            await main._cleanup_stale_preliminary(now)
+            second_calls = list(fake.calls)
             second_rows = await snapshot()
             print(json.dumps({
                 "first_calls": first_calls,

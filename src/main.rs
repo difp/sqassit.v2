@@ -193,37 +193,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     eprintln!("Reminder tick failed; it will be retried");
                 }
-                if sqassit::reminders::cleanup_expired(&service, &client, now)
-                    .await
-                    .is_err()
-                {
-                    eprintln!("Reminder cleanup failed; it will be retried");
-                }
             }
         }))
-    } else {
-        None
-    };
-    let cleanup_task = if !enable_reminders {
-        bot.as_ref().map(|bot| {
-            let bot = bot.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-                    if sqassit::reminders::cleanup_expired(&bot.profiles, &bot.client, now)
-                        .await
-                        .is_err()
-                    {
-                        eprintln!("Notification cleanup failed; it will be retried");
-                    }
-                }
-            })
-        })
     } else {
         None
     };
@@ -237,17 +208,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                if sqassit::match_feed::refresh(
-                    &runtime.profiles,
-                    &runtime.client,
-                    &runtime.notifier,
-                    now,
-                )
-                .await
-                .is_err()
-                {
-                    eprintln!("Match feed refresh failed; it will be retried");
-                }
                 if sqassit::training_status::tick(
                     &runtime.profiles,
                     &runtime.client,
@@ -258,6 +218,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_err()
                 {
                     eprintln!("Training status processing failed; it will be retried");
+                }
+                if sqassit::match_feed::refresh(
+                    &runtime.profiles,
+                    &runtime.client,
+                    &runtime.notifier,
+                    now,
+                )
+                .await
+                .is_err()
+                {
+                    eprintln!("Match feed refresh failed; it will be retried");
                 }
             }
         })
@@ -298,10 +269,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = task.await;
     }
     if let Some(task) = feed_task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(task) = cleanup_task {
         task.abort();
         let _ = task.await;
     }

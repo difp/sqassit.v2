@@ -1,8 +1,5 @@
 //! The legacy training reminder cycle. Run only one scheduler per database.
-use crate::{
-    profile::Profiles,
-    telegram::{ReminderDeleter, ReminderSender, TelegramError},
-};
+use crate::{profile::Profiles, telegram::ReminderSender};
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 
@@ -127,43 +124,6 @@ pub async fn run_tick<S: ReminderSender>(
     Ok(report)
 }
 
-/// Remove expired reminder messages; transient errors are retained for retry.
-/// Handles chat, notices, match, coach-application and reminder messages; other kinds remain pending.
-pub async fn cleanup_expired<S: ReminderDeleter>(
-    profiles: &Profiles,
-    sender: &S,
-    now: i64,
-) -> Result<(), ReminderError> {
-    let records = {
-        let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        let mut stmt=db.prepare("SELECT id,chat_id,message_id FROM event_notifications WHERE kind IN ('training','training_reminder','chat','match','match_feed','coach_application','notice') AND delete_at IS NOT NULL AND delete_at<=?1 ORDER BY delete_at").map_err(|_|ReminderError::Database)?;
-        let rows = stmt
-            .query_map([now], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|_| ReminderError::Database)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ReminderError::Database)?
-    };
-    for (id, chat, message) in records {
-        if message != 0
-            && matches!(
-                sender.delete(chat, message).await,
-                Err(TelegramError::Transport | TelegramError::Configuration)
-            )
-        {
-            continue;
-        }
-        let db = profiles.db.lock().map_err(|_| ReminderError::Database)?;
-        db.execute("DELETE FROM event_notifications WHERE id=?1 AND message_id=?2 AND delete_at IS NOT NULL AND delete_at<=?3",params![id,message,now]).map_err(|_|ReminderError::Database)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,7 +212,6 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         calls: Mutex<Vec<(i64, String)>>,
-        deletions: Mutex<Vec<i64>>,
     }
     impl ReminderSender for Fake {
         async fn send(&self, user: i64, text: &str) -> Result<i64, TelegramError> {
@@ -263,18 +222,6 @@ mod tests {
                 Err(TelegramError::Transport)
             } else {
                 Ok(100 + user)
-            }
-        }
-    }
-    impl ReminderDeleter for Fake {
-        async fn delete(&self, chat_id: i64, _message_id: i64) -> Result<(), TelegramError> {
-            let mut calls = self.deletions.lock().unwrap();
-            let retry = calls.contains(&chat_id);
-            calls.push(chat_id);
-            if chat_id == 2 && !retry {
-                Err(TelegramError::Transport)
-            } else {
-                Ok(())
             }
         }
     }
@@ -347,78 +294,6 @@ mod tests {
                 2
             );
             assert_eq!(db.query_row("SELECT count(*) FROM event_notifications WHERE kind='training_reminder' AND delete_at IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),2);
-            db.execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('other',1,1,1,333,'',0,1)",[]).unwrap();
         }
-        cleanup_expired(&profiles, &sender, 19_099).await.unwrap();
-        assert!(sender.deletions.lock().unwrap().is_empty());
-        cleanup_expired(&profiles, &sender, 19_100).await.unwrap();
-        assert_eq!(
-            profiles
-                .db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT count(*) FROM event_notifications WHERE kind='training_reminder'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-        cleanup_expired(&profiles, &sender, 19_101).await.unwrap();
-        assert_eq!(
-            profiles
-                .db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT count(*) FROM event_notifications WHERE kind='training_reminder'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            profiles
-                .db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT count(*) FROM event_notifications WHERE kind='other'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-        profiles.db.lock().unwrap().execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('chat',99,3,3,777,'',0,19102)",[]).unwrap();
-        cleanup_expired(&profiles, &sender, 19_102).await.unwrap();
-        assert_eq!(
-            profiles
-                .db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT count(*) FROM event_notifications WHERE kind='chat'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        assert!(sender.deletions.lock().unwrap().contains(&3));
-        profiles.db.lock().unwrap().execute("INSERT INTO event_notifications(kind,entity_id,chat_id,user_id,message_id,text,updated_at,delete_at) VALUES('match',1,4,4,888,'',0,19103),('match_feed',0,5,5,889,'',0,19103),('coach_application',77,6,6,890,'',0,19103),('notice',891,7,7,891,'',0,19103)",[]).unwrap();
-        cleanup_expired(&profiles, &sender, 19_103).await.unwrap();
-        let db = profiles.db.lock().unwrap();
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM event_notifications WHERE kind IN ('match','match_feed','coach_application','notice')",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
     }
 }
